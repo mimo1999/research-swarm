@@ -129,9 +129,13 @@ def _ingest_documents(session_id: str, uploaded_pdfs: list, extra_urls: list[str
 # ── Graph streaming helpers ───────────────────────────────────────────────────
 
 def _apply_ui_settings(ui: dict) -> None:
-    """Apply only settings still consumed by lower-level shared components."""
-    settings.max_sources = ui["max_sources"]
-    # If Ollama is selected, honour any custom base URL entered in the sidebar
+    """Apply settings that cannot yet be threaded through AgentState.
+
+    model_provider, model_name, and max_sources are already in AgentState so
+    they are NOT mutated here.  Only the Ollama base URL (infrastructure config,
+    not a per-run parameter) is written to settings so that RAG query engines and
+    the LLM factory both see the user's custom URL consistently.
+    """
     if ui["provider"] == "ollama" and ui.get("ollama_url"):
         settings.ollama_base_url = ui["ollama_url"]
 

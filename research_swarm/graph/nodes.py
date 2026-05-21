@@ -20,11 +20,15 @@ from research_swarm.tools.retriever_tool import build_retriever_tool
 logger = logging.getLogger(__name__)
 
 
-def _get_researcher_tools():
-    """Return the tool list for the researcher, including the RAG retriever."""
+def _get_researcher_tools(max_sources: int | None = None):
+    """Return the tool list for the researcher, including the RAG retriever.
+
+    max_sources is forwarded to the retriever so the vector store uses the
+    per-session limit rather than the process-wide default.
+    """
     tools = [web_search, arxiv_search, fetch_url]
     try:
-        tools.append(build_retriever_tool())
+        tools.append(build_retriever_tool(max_sources=max_sources))
     except Exception as exc:
         logger.warning("RAG retriever unavailable: %s", exc)
     return tools
@@ -64,6 +68,18 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
 
     llm = _get_state_llm(state)
     decision = await run_supervisor(state, llm)
+
+    # When the LLM just created a plan, always route to researcher regardless
+    # of what the LLM returned for next_agent.  This makes the post-plan
+    # transition deterministic and removes a source of fragility.
+    if decision.plan is not None:
+        from research_swarm.agents.supervisor import SupervisorDecision
+        decision = SupervisorDecision(
+            reasoning=decision.reasoning,
+            next_agent="researcher",
+            plan=decision.plan,
+        )
+
     logger.info("Supervisor decision: %s (iter %d)", decision.next_agent, iteration)
 
     update: dict[str, Any] = {
@@ -82,7 +98,9 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
 async def researcher_node(state: AgentState) -> dict[str, Any]:
     """Research sub-questions using web/arXiv/RAG tools; emit Findings."""
     llm = _get_state_llm(state)
-    tools = _get_researcher_tools()
+    query = state.get("query")
+    max_sources = query.max_sources if query else None
+    tools = _get_researcher_tools(max_sources=max_sources)
     new_findings = await run_researcher(state, llm, tools)
 
     logger.info("Researcher produced %d finding(s).", len(new_findings))

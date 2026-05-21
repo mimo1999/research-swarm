@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING
 
 from langchain_core.language_models import BaseChatModel
@@ -11,6 +12,8 @@ from pydantic import BaseModel, Field
 from research_swarm.config import settings
 from research_swarm.schemas import ResearchPlan
 from research_swarm.schemas.state import AgentName
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from research_swarm.schemas.state import AgentState
@@ -102,7 +105,26 @@ async def run_supervisor(state: AgentState, llm: BaseChatModel) -> SupervisorDec
             )
         ),
     ]
-    return await structured_llm.ainvoke(messages)
+    try:
+        return await structured_llm.ainvoke(messages)
+    except Exception as exc:
+        # LLM unavailable or returned unparseable output -- build a minimal fallback
+        # plan so the graph can still proceed rather than crashing.
+        topic = query.topic if query else "research topic"
+        logger.warning(
+            "Supervisor LLM failed during plan generation (%s: %s) -- using fallback plan.",
+            type(exc).__name__,
+            exc,
+        )
+        return SupervisorDecision(
+            reasoning=f"LLM unavailable ({type(exc).__name__}); using minimal fallback plan.",
+            next_agent="researcher",
+            plan=ResearchPlan(
+                sub_questions=[topic],
+                strategy="Direct research of the main topic",
+                required_tools=["web_search"],
+            ),
+        )
 
 
 def _route_from_state(state: AgentState) -> SupervisorDecision | None:

@@ -67,20 +67,28 @@ def get_local_llm() -> BaseLLM | None:
 # Query engine helpers
 # ---------------------------------------------------------------------------
 
-def _vector_query_engine(index: VectorStoreIndex, llm: BaseLLM | None) -> BaseQueryEngine:
+def _vector_query_engine(
+    index: VectorStoreIndex,
+    llm: BaseLLM | None,
+    max_sources: int | None = None,
+) -> BaseQueryEngine:
     """Build a vector query engine.
 
     With LLM  -> response_mode="compact" (LLM summarises retrieved chunks).
     Without   -> response_mode="no_text"  (returns raw source nodes only).
+
+    max_sources overrides settings.max_sources so the engine can use the
+    per-session value rather than the process-wide default.
     """
+    top_k = max_sources if max_sources is not None else settings.max_sources
     if llm is not None:
         return index.as_query_engine(
             llm=llm,
-            similarity_top_k=settings.max_sources,
+            similarity_top_k=top_k,
             response_mode="compact",
         )
     return index.as_query_engine(
-        similarity_top_k=settings.max_sources,
+        similarity_top_k=top_k,
         response_mode="no_text",
     )
 
@@ -142,12 +150,18 @@ def _sub_question_engine(
 # Public factory
 # ---------------------------------------------------------------------------
 
-def get_research_query_engine(session_id: str) -> BaseQueryEngine:
+def get_research_query_engine(
+    session_id: str,
+    max_sources: int | None = None,
+) -> BaseQueryEngine:
     """Return the best available query engine for the given session.
 
     Checks whether Ollama is reachable and builds accordingly:
       - Ollama UP  -> SubQuestionQueryEngine(RouterQueryEngine(vector, summary))
       - Ollama DOWN -> plain VectorQueryEngine with response_mode="no_text"
+
+    max_sources controls the vector store's similarity_top_k.  When None the
+    value from settings.max_sources is used, preserving backward compatibility.
 
     The returned engine is safe to call with `.query(question_str)`.
     Source nodes are always available on the response via `.source_nodes`.
@@ -157,14 +171,14 @@ def get_research_query_engine(session_id: str) -> BaseQueryEngine:
 
     if llm is None:
         logger.info("Building vector-only query engine for session '%s'.", session_id)
-        return _vector_query_engine(vector_index, llm=None)
+        return _vector_query_engine(vector_index, llm=None, max_sources=max_sources)
 
     logger.info(
         "Ollama available -- building full Router+SubQuestion engine for session '%s'.",
         session_id,
     )
 
-    vector_engine = _vector_query_engine(vector_index, llm)
+    vector_engine = _vector_query_engine(vector_index, llm, max_sources=max_sources)
     summary_index = build_summary_index(session_id, llm, documents=None)
     summary_engine = _summary_query_engine(summary_index, llm)
     router = _router_query_engine(vector_engine, summary_engine, llm)

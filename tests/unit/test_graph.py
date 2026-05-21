@@ -397,6 +397,66 @@ class TestRunSupervisor:
         human_content = str(captured_messages[-1].content)
         assert "AI safety" in human_content
 
+    @pytest.mark.asyncio
+    async def test_llm_failure_returns_fallback_plan(self):
+        """If the LLM fails during plan generation, a minimal fallback plan is returned."""
+        from research_swarm.agents.supervisor import run_supervisor
+
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output.return_value.ainvoke = AsyncMock(
+            side_effect=RuntimeError("LLM unavailable")
+        )
+
+        state = _make_state()  # plan=None triggers the LLM path
+        result = await run_supervisor(state, mock_llm)
+
+        assert result.plan is not None
+        assert result.next_agent == "researcher"
+        assert len(result.plan.sub_questions) >= 1
+
+    @pytest.mark.asyncio
+    async def test_deterministic_routing_bypasses_llm(self):
+        """When _route_from_state can decide, the LLM must NOT be called."""
+        from research_swarm.agents.supervisor import run_supervisor
+
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output.return_value.ainvoke = AsyncMock()
+
+        # Plan exists + findings present -> deterministic critic route
+        state = _make_state(plan=_make_plan(), findings=[_make_finding()])
+        result = await run_supervisor(state, mock_llm)
+
+        mock_llm.with_structured_output.return_value.ainvoke.assert_not_called()
+        assert result.next_agent == "critic"
+
+
+# ---------------------------------------------------------------------------
+# nodes.py — supervisor_node: deterministic plan-creation override
+# ---------------------------------------------------------------------------
+
+class TestSupervisorNodePlanOverride:
+    @pytest.mark.asyncio
+    async def test_plan_creation_forces_researcher_regardless_of_llm(self):
+        """Even if the LLM returns next_agent='fact_checker' alongside a plan,
+        supervisor_node must override it to 'researcher'."""
+        from research_swarm.agents.supervisor import SupervisorDecision
+
+        weird_decision = SupervisorDecision(
+            reasoning="Weird routing from LLM",
+            next_agent="fact_checker",  # wrong -- should be overridden
+            plan=_make_plan(),
+        )
+        with patch("research_swarm.graph.nodes.get_agent_llm") as mock_llm_fn, \
+             patch("research_swarm.graph.nodes.run_supervisor",
+                   new=AsyncMock(return_value=weird_decision)):
+            mock_llm_fn.return_value = MagicMock()
+            from research_swarm.graph.nodes import supervisor_node
+            state = _make_state()
+            result = await supervisor_node(state)
+
+        assert result["next_agent"] == "researcher"
+        assert result["plan"] is not None
+
 
 # ---------------------------------------------------------------------------
 # agents/critic.py
@@ -805,12 +865,14 @@ class TestHITLInterruptResume:
         from research_swarm.agents.supervisor import SupervisorDecision
         from research_swarm.graph.builder import build_graph, get_thread_config
 
-        # Supervisor routes directly to writer on the first call
+        # Supervisor routes directly to writer on the first call.
+        # plan=None because we're testing routing, not plan generation;
+        # returning a plan here would trigger the post-plan override to researcher.
         async def fake_run_supervisor(state, llm):
             return SupervisorDecision(
                 reasoning="Enough findings — write the report",
                 next_agent="writer",
-                plan=_make_plan(),
+                plan=None,
             )
 
         async def fake_run_writer(state, llm):  # pragma: no cover
@@ -848,11 +910,12 @@ class TestHITLInterruptResume:
 
         writer_called_with_feedback: list[str] = []
 
+        # plan=None: this is a routing decision, not plan generation.
         async def fake_run_supervisor(state, llm):
             return SupervisorDecision(
                 reasoning="Time to write",
                 next_agent="writer",
-                plan=_make_plan(),
+                plan=None,
             )
 
         async def fake_run_writer(state, llm):

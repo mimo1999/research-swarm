@@ -62,15 +62,21 @@ def make_retriever_tool(get_query_engine: Callable):
     return retrieve_from_rag
 
 
-def build_retriever_tool():
+def build_retriever_tool(max_sources: int | None = None):
     """Return a LangChain tool backed by the real Phase 3 query engine factory.
+
+    max_sources is forwarded to get_research_query_engine so the vector store's
+    similarity_top_k reflects the per-session value rather than the global default.
 
     Import is deferred so that tools/ can be imported before rag/ is fully
     initialised (avoids circular imports at module load time).
     """
     from research_swarm.rag.query_engines import get_research_query_engine
 
-    return make_retriever_tool(get_research_query_engine)
+    def _get_engine(session_id: str):
+        return get_research_query_engine(session_id, max_sources=max_sources)
+
+    return make_retriever_tool(_get_engine)
 
 
 # Convenience: a no-op placeholder tool for use before Phase 3 is wired up.
