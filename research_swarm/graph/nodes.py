@@ -10,7 +10,7 @@ from research_swarm.agents.base import get_agent_llm
 from research_swarm.agents.critic import run_critic
 from research_swarm.agents.fact_checker import run_fact_checker
 from research_swarm.agents.researcher import run_researcher
-from research_swarm.agents.supervisor import run_supervisor
+from research_swarm.agents.supervisor import SupervisorDecision, run_supervisor
 from research_swarm.agents.writer import run_writer
 from research_swarm.config import settings
 from research_swarm.schemas.state import AgentState
@@ -73,7 +73,6 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     # of what the LLM returned for next_agent.  This makes the post-plan
     # transition deterministic and removes a source of fragility.
     if decision.plan is not None:
-        from research_swarm.agents.supervisor import SupervisorDecision
         decision = SupervisorDecision(
             reasoning=decision.reasoning,
             next_agent="researcher",

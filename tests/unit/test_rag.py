@@ -269,6 +269,11 @@ class TestLoadVectorIndex:
 # ---------------------------------------------------------------------------
 
 class TestProbeOllama:
+    def setup_method(self):
+        # Reset the module-level TTL cache so each test gets a fresh HTTP call.
+        import research_swarm.rag.query_engines as qe
+        qe._ollama_probe_cache = None
+
     def test_returns_true_when_ollama_up(self):
         with patch("research_swarm.rag.query_engines.httpx.get") as mock_get:
             mock_get.return_value = MagicMock(status_code=200)

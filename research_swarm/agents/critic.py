@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from research_swarm.agents._utils import _field, _latest_verdicts
 from research_swarm.schemas import Critique, CritiqueVerdict, Finding
 
 if TYPE_CHECKING:
@@ -38,10 +39,6 @@ Assign a verdict.
 """
 
 
-def _field(obj, name: str, default=None):
-    return getattr(obj, name, obj.get(name, default) if isinstance(obj, dict) else default)
-
-
 async def run_critic(
     state: AgentState,
     llm: BaseChatModel,
@@ -50,16 +47,11 @@ async def run_critic(
     findings: list[Finding] = state.get("findings") or []
     existing_critiques: list[Critique] = state.get("critiques") or []
 
-    latest_verdict_by_id: dict[str, str] = {}
-    for critique in existing_critiques:
-        fid = _field(critique, "finding_id", "")
-        verdict = _field(critique, "verdict", "")
-        latest_verdict_by_id[fid] = verdict.value if hasattr(verdict, "value") else str(verdict)
+    latest_verdict_by_id = _latest_verdicts(existing_critiques)
 
     to_review = [
         f for f in findings
-        if latest_verdict_by_id.get(_field(f, "id", ""))
-        != CritiqueVerdict.supported.value
+        if latest_verdict_by_id.get(_field(f, "id", "")) != CritiqueVerdict.supported.value
     ]
 
     if not to_review:

@@ -16,6 +16,7 @@ The research agent's own LLM handles final synthesis; this layer only retrieves.
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 from llama_index.core import SummaryIndex, VectorStoreIndex
@@ -36,16 +37,32 @@ logger = logging.getLogger(__name__)
 # Ollama probe
 # ---------------------------------------------------------------------------
 
+_OLLAMA_PROBE_TTL = 60.0  # seconds between live HTTP checks
+_ollama_probe_cache: tuple[bool, float] | None = None
+
+
 def probe_ollama() -> bool:
-    """Return True if the local Ollama HTTP endpoint is reachable."""
+    """Return True if the local Ollama HTTP endpoint is reachable.
+
+    Results are cached for ``_OLLAMA_PROBE_TTL`` seconds so a down server
+    does not block every researcher tool-call with a 3-second timeout.
+    """
+    global _ollama_probe_cache
+    now = time.monotonic()
+    if _ollama_probe_cache is not None:
+        cached_result, cached_at = _ollama_probe_cache
+        if now - cached_at < _OLLAMA_PROBE_TTL:
+            return cached_result
     try:
         resp = httpx.get(
             f"{settings.ollama_base_url}/api/tags",
             timeout=3.0,
         )
-        return resp.status_code == 200
+        result = resp.status_code == 200
     except Exception:
-        return False
+        result = False
+    _ollama_probe_cache = (result, now)
+    return result
 
 
 def get_local_llm() -> BaseLLM | None:

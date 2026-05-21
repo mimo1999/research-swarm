@@ -8,6 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from research_swarm.agents._utils import _field, _latest_verdicts
 from research_swarm.schemas import Finding
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -58,22 +59,16 @@ async def run_fact_checker(
     findings: list[Finding] = state.get("findings") or []
     critiques: list = state.get("critiques") or []
 
-    # Index critiques by finding_id -- store the .value string for reliable comparison
-    latest_verdict_by_id: dict[str, str] = {}
-    for c in critiques:
-        fid = c.finding_id if hasattr(c, "finding_id") else c.get("finding_id", "")
-        v = c.verdict if hasattr(c, "verdict") else c.get("verdict", "")
-        latest_verdict_by_id[fid] = v.value if hasattr(v, "value") else str(v)
     refuted_ids = {
         fid
-        for fid, verdict in latest_verdict_by_id.items()
+        for fid, verdict in _latest_verdicts(critiques).items()
         if verdict == CritiqueVerdict.refuted.value
     }
 
     # Skip findings the critic already marked as refuted
     to_check = [
         f for f in findings
-        if (f.id if hasattr(f, "id") else f.get("id", "")) not in refuted_ids
+        if _field(f, "id", "") not in refuted_ids
     ]
 
     if not to_check:
@@ -85,9 +80,9 @@ async def run_fact_checker(
     updated_findings: list[Finding] = []
 
     for finding in to_check:
-        fid = finding.id if hasattr(finding, "id") else finding.get("id", "")
-        claim = finding.claim if hasattr(finding, "claim") else finding.get("claim", "")
-        evidence = finding.evidence if hasattr(finding, "evidence") else finding.get("evidence", [])
+        fid = _field(finding, "id", "")
+        claim = _field(finding, "claim", "")
+        evidence = _field(finding, "evidence", [])
         if not evidence:
             # No sources -- penalise confidence
             updated = _update_confidence(finding, 0.1)
@@ -113,16 +108,12 @@ async def run_fact_checker(
             new_confidence = result.confidence_score
         except Exception as exc:
             logger.warning("FactChecker failed for finding %s: %s", fid[:8], exc)
-            new_confidence = (
-                finding.confidence
-                if hasattr(finding, "confidence")
-                else finding.get("confidence", 0.5)
-            )
+            new_confidence = _field(finding, "confidence", 0.5)
 
         updated = _update_confidence(finding, new_confidence)
         updated_findings.append(updated)
         logger.info("FactCheck %s: confidence %.2f -> %.2f", fid[:8],
-                    finding.confidence if hasattr(finding, "confidence") else 0.5,
+                    _field(finding, "confidence", 0.5),
                     new_confidence)
 
     return updated_findings

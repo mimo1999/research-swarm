@@ -9,6 +9,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
+from research_swarm.agents._utils import _latest_verdicts
 from research_swarm.config import settings
 from research_swarm.schemas import ResearchPlan
 from research_swarm.schemas.state import AgentName
@@ -140,12 +141,6 @@ def _route_from_state(state: AgentState) -> SupervisorDecision | None:
             next_agent="end",
         )
 
-    if state.get("draft_report") is not None:
-        return SupervisorDecision(
-            reasoning="Draft report exists; ending session.",
-            next_agent="end",
-        )
-
     if state.get("next_agent") == "researcher" and state.get("human_feedback"):
         return SupervisorDecision(
             reasoning="Human feedback requested another research pass.",
@@ -161,7 +156,9 @@ def _route_from_state(state: AgentState) -> SupervisorDecision | None:
             next_agent="researcher",
         )
 
-    last_agent = _last_worker_agent(state)
+    # next_agent reflects what the previous supervisor call scheduled, so it
+    # tells us which worker just completed without scanning the messages list.
+    last_agent = state.get("next_agent")
     if last_agent == "researcher":
         return SupervisorDecision(
             reasoning="Researcher produced findings; sending them to the critic.",
@@ -200,28 +197,3 @@ def _route_from_state(state: AgentState) -> SupervisorDecision | None:
     )
 
 
-def _latest_verdicts(critiques: list) -> dict[str, str]:
-    latest: dict[str, str] = {}
-    for critique in critiques:
-        fid = (
-            critique.finding_id
-            if hasattr(critique, "finding_id")
-            else critique.get("finding_id", "")
-        )
-        verdict = critique.verdict if hasattr(critique, "verdict") else critique.get("verdict", "")
-        latest[fid] = verdict.value if hasattr(verdict, "value") else str(verdict)
-    return latest
-
-
-def _last_worker_agent(state: AgentState) -> str | None:
-    for message in reversed(state.get("messages") or []):
-        content = getattr(message, "content", "")
-        if content.startswith("[Researcher]"):
-            return "researcher"
-        if content.startswith("[Critic]"):
-            return "critic"
-        if content.startswith("[FactChecker]"):
-            return "fact_checker"
-        if content.startswith("[Writer]"):
-            return "writer"
-    return None

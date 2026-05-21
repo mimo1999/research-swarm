@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from research_swarm.agents._utils import _field, _latest_verdicts
 from research_swarm.schemas import FinalReport, ReportSection, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -90,22 +91,16 @@ async def run_writer(
     plan = state.get("plan")
     human_feedback = state.get("human_feedback") or "None provided."
 
-    # Filter: include supported findings + fact-checked weak ones (confidence >= 0.4)
-    latest_verdict_by_id: dict[str, str] = {}
-    for c in critiques:
-        verdict = c.verdict if hasattr(c, "verdict") else c.get("verdict", "")
-        fid = c.finding_id if hasattr(c, "finding_id") else c.get("finding_id", "")
-        latest_verdict_by_id[fid] = verdict.value if hasattr(verdict, "value") else str(verdict)
     refuted_ids = {
         fid
-        for fid, verdict in latest_verdict_by_id.items()
+        for fid, verdict in _latest_verdicts(critiques).items()
         if verdict == CritiqueVerdict.refuted.value
     }
 
     valid_findings = [
         f for f in findings
-        if (f.id if hasattr(f, "id") else f.get("id", "")) not in refuted_ids
-        and (f.confidence if hasattr(f, "confidence") else f.get("confidence", 0)) >= 0.3
+        if _field(f, "id", "") not in refuted_ids
+        and _field(f, "confidence", 0) >= 0.3
     ]
 
     if not valid_findings:
