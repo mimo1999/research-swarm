@@ -1,17 +1,16 @@
-"""RAG ingestion pipeline — converts PDFs, URLs, and arXiv results into
+"""RAG ingestion pipeline -- converts PDFs, URLs, and arXiv results into
 LlamaIndex Documents and stores them in a session-scoped ChromaDB collection.
 
 All computation is local:
   - Text extraction : existing tools (pdf_loader, url_fetcher, arxiv_tool)
   - Chunking        : LlamaIndex SentenceSplitter (CPU)
-  - Embeddings      : HuggingFaceEmbedding (CPU) — see rag/indexes.py
+  - Embeddings      : HuggingFaceEmbedding (CPU) -- see rag/indexes.py
   - Vector store    : ChromaDB persisted to data/sessions/<session_id>/chroma/
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Sequence
 
 import chromadb
 from llama_index.core import Document, StorageContext, VectorStoreIndex
@@ -85,7 +84,7 @@ class IngestionPipeline:
         return self._get_chroma_collection().count()
 
     # ------------------------------------------------------------------
-    # Core: text → Documents → nodes → Chroma
+    # Core: text -> Documents -> nodes -> Chroma
     # ------------------------------------------------------------------
 
     def _text_to_documents(self, text: str, metadata: dict) -> list[Document]:
@@ -138,7 +137,7 @@ class IngestionPipeline:
 
         result = load_pdf.invoke({"file_path": file_path})
         if not result.get("chunks"):
-            logger.warning("PDF '%s': no chunks extracted — %s", file_path, result.get("snippet"))
+            logger.warning("PDF '%s': no chunks extracted -- %s", file_path, result.get("snippet"))
             return 0
 
         total = 0
@@ -164,7 +163,7 @@ class IngestionPipeline:
         result = fetch_url.invoke({"url": url, "max_chars": max_chars})
         snippet = result.get("snippet", "")
         if snippet.startswith("["):
-            logger.warning("URL '%s': fetch error — %s", url, snippet)
+            logger.warning("URL '%s': fetch error -- %s", url, snippet)
             return 0
 
         metadata = {

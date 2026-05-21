@@ -15,9 +15,7 @@ and from the real data/ directory.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -93,6 +91,7 @@ class TestMakeAsyncCheckpointer:
     @pytest.mark.asyncio
     async def test_returns_async_sqlite_saver(self, tmp_path, monkeypatch):
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
         from research_swarm.config import settings
         monkeypatch.setattr(settings, "data_dir", tmp_path)
         from research_swarm.graph.builder import make_async_checkpointer
@@ -131,10 +130,14 @@ class TestMakeAsyncCheckpointer:
         """AsyncSqliteSaver.setup() is called lazily on first write.
         Verify the table exists after writing a checkpoint via graph.ainvoke.
         """
+
         import research_swarm.graph.nodes as _nodes
-        from langgraph.checkpoint.memory import MemorySaver
         from research_swarm.config import settings
-        from research_swarm.graph.builder import make_async_checkpointer, build_graph, get_thread_config
+        from research_swarm.graph.builder import (
+            build_graph,
+            get_thread_config,
+            make_async_checkpointer,
+        )
         from research_swarm.schemas import ResearchQuery
 
         monkeypatch.setattr(settings, "data_dir", tmp_path)
@@ -177,8 +180,9 @@ class TestAsyncSqliteSaverRoundTrip:
     async def test_checkpoint_survives_reconnect(self, tmp_path, monkeypatch):
         """State written by graph.ainvoke must be readable from a fresh connection."""
         import aiosqlite
-        import research_swarm.graph.nodes as _nodes
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        import research_swarm.graph.nodes as _nodes
         from research_swarm.config import settings
         from research_swarm.graph.builder import build_graph, get_thread_config
         from research_swarm.schemas import ResearchQuery
@@ -438,10 +442,11 @@ class TestGetSessionState:
     def test_returns_state_after_graph_run(self, tmp_path, monkeypatch):
         """State written by graph.ainvoke is readable via get_session_state."""
         import asyncio
+
         import aiosqlite
-        import research_swarm.graph.nodes as _nodes
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-        from research_swarm.config import settings
+
+        import research_swarm.graph.nodes as _nodes
         from research_swarm.graph.builder import build_graph, get_thread_config
         from research_swarm.schemas import ResearchQuery
 

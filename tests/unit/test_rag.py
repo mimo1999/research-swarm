@@ -1,13 +1,9 @@
 """Unit tests for Phase 3 RAG layer — all heavy dependencies mocked."""
 from __future__ import annotations
 
-import io
-import types
-from pathlib import Path
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

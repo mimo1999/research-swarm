@@ -1,7 +1,6 @@
-"""arXiv search tool — queries the arXiv API and returns Source objects."""
+"""arXiv search tool -- queries the arXiv API and returns Source objects."""
 import io
 import textwrap
-from typing import Any
 
 import arxiv
 import httpx
@@ -32,7 +31,7 @@ def _extract_pdf_snippet(pdf_url: str, max_chars: int = 800) -> str:
             text += page.extract_text() or ""
             if len(text) >= max_chars:
                 break
-        return textwrap.shorten(text.strip(), width=max_chars, placeholder="…")
+        return textwrap.shorten(text.strip(), width=max_chars, placeholder="...")
     except Exception:
         return ""
 
@@ -53,9 +52,21 @@ def arxiv_search(
         sort_by=arxiv.SortCriterion.Relevance,
     )
     sources: list[dict] = []
-    for result in client.results(search):
+    try:
+        results = list(client.results(search))
+    except Exception as exc:
+        return [
+            Source(
+                url=f"arxiv://search/{query}",
+                title="arXiv search unavailable",
+                snippet=f"[Search error: {type(exc).__name__}]",
+                source_type=SourceType.arxiv,
+                credibility_score=0.0,
+            ).model_dump(mode="json")
+        ]
+    for result in results:
         abstract_snippet = textwrap.shorten(
-            result.summary.replace("\n", " "), width=600, placeholder="…"
+            result.summary.replace("\n", " "), width=600, placeholder="..."
         )
         snippet = abstract_snippet
         if fetch_pdf_text:

@@ -1,9 +1,9 @@
-"""SQLite session management — list, load, and delete past research sessions."""
+"""SQLite session management -- list, load, and delete past research sessions."""
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,7 @@ def list_sessions() -> list[SessionSummary]:
             if not val:
                 return None
             try:
-                return datetime.fromisoformat(str(val)).replace(tzinfo=timezone.utc)
+                return datetime.fromisoformat(str(val)).replace(tzinfo=UTC)
             except ValueError:
                 return None
 
@@ -88,6 +88,7 @@ def get_session_state(thread_id: str) -> dict[str, Any] | None:
     manage a long-lived checkpointer reference.
     """
     import asyncio
+
     from research_swarm.graph.builder import build_graph, get_thread_config, make_async_checkpointer
 
     async def _load() -> dict[str, Any] | None:

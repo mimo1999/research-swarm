@@ -17,15 +17,13 @@ import pytest
 from research_swarm.schemas import (
     Critique,
     CritiqueVerdict,
-    Finding,
     FinalReport,
-    ReportSection,
+    Finding,
     ResearchPlan,
     ResearchQuery,
     Source,
 )
 from research_swarm.schemas.state import AgentState
-
 
 # ---------------------------------------------------------------------------
 # Helpers shared across tests
@@ -74,20 +72,22 @@ class TestGetAgentLlm:
 
     def test_anthropic_returns_chat_anthropic(self):
         from langchain_anthropic import ChatAnthropic
+
         from research_swarm.agents.base import get_agent_llm
         with patch("research_swarm.agents.base.ChatAnthropic") as mock_cls:
             mock_cls.return_value = MagicMock(spec=ChatAnthropic)
-            llm = get_agent_llm(provider="anthropic", model="claude-haiku-3-5")
+            get_agent_llm(provider="anthropic", model="claude-haiku-3-5")
         mock_cls.assert_called_once()
         call_kwargs = mock_cls.call_args.kwargs
         assert call_kwargs["model"] == "claude-haiku-3-5"
 
     def test_openai_returns_chat_openai(self):
         from langchain_openai import ChatOpenAI
+
         from research_swarm.agents.base import get_agent_llm
         with patch("research_swarm.agents.base.ChatOpenAI") as mock_cls:
             mock_cls.return_value = MagicMock(spec=ChatOpenAI)
-            llm = get_agent_llm(provider="openai", model="gpt-4o-mini")
+            get_agent_llm(provider="openai", model="gpt-4o-mini")
         mock_cls.assert_called_once()
         assert mock_cls.call_args.kwargs["model"] == "gpt-4o-mini"
 
@@ -105,8 +105,8 @@ class TestGetAgentLlm:
             get_agent_llm(provider="bedrock", model="any")
 
     def test_defaults_to_settings_provider_and_model(self, monkeypatch):
-        from research_swarm.config import settings
         from research_swarm.agents.base import get_agent_llm
+        from research_swarm.config import settings
         monkeypatch.setattr(settings, "default_model_provider", "anthropic")
         monkeypatch.setattr(settings, "default_model_name", "claude-haiku-3-5")
         with patch("research_swarm.agents.base.ChatAnthropic") as mock_cls:
@@ -215,7 +215,7 @@ class TestRunResearcher:
     @pytest.mark.asyncio
     async def test_synthesis_failure_produces_placeholder_finding(self):
         """If the synthesis LLM raises, the researcher falls back to a low-confidence placeholder."""
-        from research_swarm.agents.researcher import run_researcher, FindingSynthesis
+        from research_swarm.agents.researcher import run_researcher
 
         ai_stop = MagicMock()
         ai_stop.tool_calls = []
@@ -254,8 +254,9 @@ class TestRunToolLoop:
 
     @pytest.mark.asyncio
     async def test_stops_when_no_tool_calls(self):
-        from research_swarm.agents.researcher import _run_tool_loop
         from langchain_core.messages import SystemMessage
+
+        from research_swarm.agents.researcher import _run_tool_loop
 
         ai_done = MagicMock()
         ai_done.tool_calls = []
@@ -272,6 +273,7 @@ class TestRunToolLoop:
     @pytest.mark.asyncio
     async def test_invokes_tool_and_appends_tool_message(self):
         from langchain_core.messages import SystemMessage, ToolMessage
+
         from research_swarm.agents.researcher import _run_tool_loop
 
         tool = self._mock_tool("web_search")
@@ -301,6 +303,7 @@ class TestRunToolLoop:
     @pytest.mark.asyncio
     async def test_unknown_tool_name_injects_error_message(self):
         from langchain_core.messages import SystemMessage, ToolMessage
+
         from research_swarm.agents.researcher import _run_tool_loop
 
         ai_with_call = MagicMock()
@@ -330,6 +333,7 @@ class TestRunToolLoop:
 class TestExtractSources:
     def test_extracts_sources_from_tool_message(self):
         from langchain_core.messages import ToolMessage
+
         from research_swarm.agents.researcher import _extract_sources_from_messages
 
         payload = [{"url": "https://ex.com", "title": "Ex",
@@ -342,6 +346,7 @@ class TestExtractSources:
 
     def test_ignores_non_tool_messages(self):
         from langchain_core.messages import HumanMessage
+
         from research_swarm.agents.researcher import _extract_sources_from_messages
 
         result = _extract_sources_from_messages([HumanMessage(content="hello")])
@@ -349,6 +354,7 @@ class TestExtractSources:
 
     def test_handles_malformed_json_gracefully(self):
         from langchain_core.messages import ToolMessage
+
         from research_swarm.agents.researcher import _extract_sources_from_messages
 
         bad = ToolMessage(content="not valid json {{", tool_call_id="c1")
@@ -357,6 +363,7 @@ class TestExtractSources:
 
     def test_caps_at_ten_sources(self):
         from langchain_core.messages import ToolMessage
+
         from research_swarm.agents.researcher import _extract_sources_from_messages
 
         payload = [{"url": f"https://ex{i}.com", "snippet": "s",
@@ -475,7 +482,7 @@ class TestRunFactCheckerDirect:
 
     @pytest.mark.asyncio
     async def test_updates_confidence_from_llm_score(self):
-        from research_swarm.agents.fact_checker import run_fact_checker, FactCheckResult
+        from research_swarm.agents.fact_checker import FactCheckResult, run_fact_checker
 
         finding = _make_finding(confidence=0.5)
         finding = finding.model_copy(update={"evidence": [_make_source()]})

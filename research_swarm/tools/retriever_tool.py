@@ -1,16 +1,16 @@
-"""Retriever tool — wraps a LlamaIndex query engine as a LangChain tool.
+"""Retriever tool -- wraps a LlamaIndex query engine as a LangChain tool.
 
 The query engine is built in Phase 3 (rag/query_engines.py). This module
 provides the LangChain @tool wrapper so the Researcher agent can call it.
 
 Two modes:
-  make_retriever_tool(factory)  — bind a custom engine factory (used in tests).
-  build_retriever_tool()        — bind the real get_research_query_engine from Phase 3.
-  retriever_stub                — no-op placeholder (returns []).
+  make_retriever_tool(factory)  -- bind a custom engine factory (used in tests).
+  build_retriever_tool()        -- bind the real get_research_query_engine from Phase 3.
+  retriever_stub                -- no-op placeholder (returns []).
 """
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
@@ -76,5 +76,5 @@ def build_retriever_tool():
 # Convenience: a no-op placeholder tool for use before Phase 3 is wired up.
 @tool("retrieve_from_rag_stub", args_schema=RetrieverInput)
 def retriever_stub(query: str, session_id: str, top_k: int = 5) -> list[dict]:
-    """Stub retriever — returns empty list until Phase 3 is implemented."""
+    """Stub retriever -- returns empty list until Phase 3 is implemented."""
     return []

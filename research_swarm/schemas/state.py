@@ -1,10 +1,12 @@
-from typing import Annotated, Literal
-from typing_extensions import TypedDict
+from typing import Annotated, Literal, NotRequired
+
 from langgraph.graph.message import add_messages
-from .query import ResearchQuery
-from .plan import ResearchPlan
-from .finding import Finding
+from typing_extensions import TypedDict
+
 from .critique import Critique
+from .finding import Finding
+from .plan import ResearchPlan
+from .query import ResearchQuery
 from .report import FinalReport
 
 
@@ -14,7 +16,7 @@ def _add_list(existing: list, new: list) -> list:
 
 
 def _merge_findings(existing: list, new: list) -> list:
-    """Merge findings by id — new items with matching ids overwrite existing ones.
+    """Merge findings by id -- new items with matching ids overwrite existing ones.
 
     This lets the fact-checker return updated Finding objects (same id,
     revised confidence) without duplicating the list.
@@ -60,3 +62,7 @@ class AgentState(TypedDict):
 
     # Session identifier for persistence
     session_id: str
+
+    # Per-run model settings; omitted in tests and older checkpoints.
+    model_provider: NotRequired[str]
+    model_name: NotRequired[str]

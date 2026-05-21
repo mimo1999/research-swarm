@@ -1,11 +1,11 @@
-"""RAG index builders — create and load session-scoped LlamaIndex indexes.
+"""RAG index builders -- create and load session-scoped LlamaIndex indexes.
 
 Two indexes per session:
   - VectorStoreIndex  : backed by ChromaDB; used for specific fact retrieval.
   - SummaryIndex      : in-memory list index; used for high-level doc overviews.
     (Built only when Ollama is available; see query_engines.py.)
 
-All computation is local — HuggingFaceEmbedding runs on CPU, no cloud calls.
+All computation is local -- HuggingFaceEmbedding runs on CPU, no cloud calls.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Singletons — embedding model is expensive to load; cache after first load
+# Singletons -- embedding model is expensive to load; cache after first load
 # ---------------------------------------------------------------------------
 
 @functools.lru_cache(maxsize=1)
@@ -34,12 +34,12 @@ def get_embed_model() -> HuggingFaceEmbedding:
     """Return a cached HuggingFaceEmbedding instance (BAAI/bge-small-en-v1.5).
 
     Downloads the model on first call (~130 MB) to ~/.cache/huggingface.
-    All subsequent calls return the cached instance — no re-download.
+    All subsequent calls return the cached instance -- no re-download.
     """
     kwargs: dict = {"model_name": settings.embed_model_name}
     if settings.embed_cache_dir:
         kwargs["cache_folder"] = settings.embed_cache_dir
-    logger.info("Loading embed model '%s' …", settings.embed_model_name)
+    logger.info("Loading embed model '%s' ...", settings.embed_model_name)
     model = HuggingFaceEmbedding(**kwargs)
     logger.info("Embed model loaded.")
     return model
@@ -77,7 +77,7 @@ def _get_chroma_store(session_id: str) -> ChromaVectorStore:
 def load_vector_index(session_id: str) -> VectorStoreIndex:
     """Load (or create empty) a VectorStoreIndex from the session's Chroma store.
 
-    This is cheap — it connects to the existing persisted collection rather
+    This is cheap -- it connects to the existing persisted collection rather
     than re-embedding anything.
     """
     embed_model = get_embed_model()
@@ -105,7 +105,7 @@ def build_summary_index(
         session_id: Session identifier.
         llm: A LlamaIndex-compatible LLM instance (e.g. Ollama).
         documents: Optional list of llama_index Documents. If None, the index
-            is empty — useful as a placeholder when no LLM is available.
+            is empty -- useful as a placeholder when no LLM is available.
     """
     docs = documents or []
     # Temporarily configure LlamaIndex global settings for this index build

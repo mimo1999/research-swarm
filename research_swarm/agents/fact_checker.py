@@ -1,4 +1,4 @@
-"""Fact-checker agent — cross-checks claims against source snippets and updates confidence."""
+"""Fact-checker agent -- cross-checks claims against source snippets and updates confidence."""
 from __future__ import annotations
 
 import logging
@@ -27,8 +27,8 @@ Consider:
   - Are there contradictions between sources?
 
 Return only a JSON object with:
-  confidence_score  — float 0.0–1.0
-  notes             — one sentence explaining your assessment
+  confidence_score  -- float 0.0-1.0
+  notes             -- one sentence explaining your assessment
 """
 
 _CLAIM_TEMPLATE = """\
@@ -47,7 +47,7 @@ class FactCheckResult(BaseModel):
 
 
 async def run_fact_checker(
-    state: "AgentState",
+    state: AgentState,
     llm: BaseChatModel,
 ) -> list[Finding]:
     """Cross-check every supported/weak finding and return updated Finding objects.
@@ -58,15 +58,17 @@ async def run_fact_checker(
     findings: list[Finding] = state.get("findings") or []
     critiques: list = state.get("critiques") or []
 
-    # Index critiques by finding_id — store the .value string for reliable comparison
-    refuted_ids: set[str] = set()
+    # Index critiques by finding_id -- store the .value string for reliable comparison
+    latest_verdict_by_id: dict[str, str] = {}
     for c in critiques:
         fid = c.finding_id if hasattr(c, "finding_id") else c.get("finding_id", "")
         v = c.verdict if hasattr(c, "verdict") else c.get("verdict", "")
-        # StrEnum: `.value` gives "refuted"; plain str also works
-        verdict_val = v.value if hasattr(v, "value") else str(v)
-        if verdict_val == CritiqueVerdict.refuted.value:
-            refuted_ids.add(fid)
+        latest_verdict_by_id[fid] = v.value if hasattr(v, "value") else str(v)
+    refuted_ids = {
+        fid
+        for fid, verdict in latest_verdict_by_id.items()
+        if verdict == CritiqueVerdict.refuted.value
+    }
 
     # Skip findings the critic already marked as refuted
     to_check = [
@@ -86,16 +88,14 @@ async def run_fact_checker(
         fid = finding.id if hasattr(finding, "id") else finding.get("id", "")
         claim = finding.claim if hasattr(finding, "claim") else finding.get("claim", "")
         evidence = finding.evidence if hasattr(finding, "evidence") else finding.get("evidence", [])
-        sub_q = finding.sub_question if hasattr(finding, "sub_question") else finding.get("sub_question", "")
-
         if not evidence:
-            # No sources — penalise confidence
+            # No sources -- penalise confidence
             updated = _update_confidence(finding, 0.1)
             updated_findings.append(updated)
             continue
 
         sources_text = "\n".join(
-            f"[{i+1}] {(e.url if hasattr(e, 'url') else e.get('url',''))} — "
+            f"[{i+1}] {(e.url if hasattr(e, 'url') else e.get('url',''))} -- "
             f"{(e.snippet if hasattr(e, 'snippet') else e.get('snippet',''))[:200]}"
             for i, e in enumerate(evidence[:5])
         )
@@ -113,11 +113,15 @@ async def run_fact_checker(
             new_confidence = result.confidence_score
         except Exception as exc:
             logger.warning("FactChecker failed for finding %s: %s", fid[:8], exc)
-            new_confidence = finding.confidence if hasattr(finding, "confidence") else finding.get("confidence", 0.5)
+            new_confidence = (
+                finding.confidence
+                if hasattr(finding, "confidence")
+                else finding.get("confidence", 0.5)
+            )
 
         updated = _update_confidence(finding, new_confidence)
         updated_findings.append(updated)
-        logger.info("FactCheck %s: confidence %.2f → %.2f", fid[:8],
+        logger.info("FactCheck %s: confidence %.2f -> %.2f", fid[:8],
                     finding.confidence if hasattr(finding, "confidence") else 0.5,
                     new_confidence)
 

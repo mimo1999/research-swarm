@@ -1,12 +1,10 @@
 """Unit tests for Phase 2 tools — all network calls are mocked."""
 import io
-import pytest
-from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
+
 from pypdf import PdfWriter
 
 from research_swarm.schemas.source import SourceType
-
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -117,15 +115,17 @@ class TestWebSearch:
         assert result[0]["credibility_score"] == 0.6
 
     @patch("research_swarm.tools.web_search.TavilyClient")
-    def test_tavily_exception_returns_empty_list(self, mock_client_cls):
-        """If TavilyClient raises (e.g. invalid API key / network error), return []."""
+    def test_tavily_exception_returns_error_source(self, mock_client_cls):
+        """If TavilyClient raises, return a trace-visible error source."""
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_client.search.side_effect = RuntimeError("API key invalid")
 
         from research_swarm.tools.web_search import web_search
         result = web_search.invoke({"query": "test"})
-        assert result == []
+        assert len(result) == 1
+        assert result[0]["credibility_score"] == 0.0
+        assert "Search error" in result[0]["snippet"]
 
 
 # ── arxiv_search ──────────────────────────────────────────────────────────────

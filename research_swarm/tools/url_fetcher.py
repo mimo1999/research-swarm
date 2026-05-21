@@ -1,4 +1,4 @@
-"""URL fetch tool — downloads a webpage and extracts readable text."""
+"""URL fetch tool -- downloads a webpage and extracts readable text."""
 import re
 import textwrap
 
@@ -8,7 +8,6 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 from research_swarm.schemas.source import Source, SourceType
-
 
 _HEADERS = {
     "User-Agent": (
@@ -47,7 +46,9 @@ def _readability_extract(soup: BeautifulSoup) -> str:
             return candidate.get_text(separator=" ", strip=True)
 
     body = soup.find("body")
-    return body.get_text(separator=" ", strip=True) if body else soup.get_text(separator=" ", strip=True)
+    if body:
+        return body.get_text(separator=" ", strip=True)
+    return soup.get_text(separator=" ", strip=True)
 
 
 def _collapse_whitespace(text: str) -> str:
@@ -77,7 +78,7 @@ def fetch_url(url: str, max_chars: int = 3000) -> dict:
         title = _extract_title(soup)
         raw_text = _readability_extract(soup)
         text = _collapse_whitespace(raw_text)
-        snippet = textwrap.shorten(text, width=max_chars, placeholder="…")
+        snippet = textwrap.shorten(text, width=max_chars, placeholder="...")
 
         source = Source(
             url=url,

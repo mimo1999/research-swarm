@@ -2,6 +2,7 @@
 
 Run with:  streamlit run app.py
 """
+# ruff: noqa: E402, I001
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +10,6 @@ import os
 import tempfile
 import threading
 import uuid
-from pathlib import Path
 
 import streamlit as st
 
@@ -44,7 +44,7 @@ from research_swarm.config import settings
 from research_swarm.graph.builder import build_graph, get_thread_config, make_async_checkpointer
 from research_swarm.rag.indexes import get_embed_model
 from research_swarm.rag.ingestion import IngestionPipeline
-from research_swarm.schemas import ResearchDepth, ResearchQuery
+from research_swarm.schemas import ResearchQuery
 from research_swarm.ui.report_view import render_report
 from research_swarm.ui.sessions_view import render_sessions_tab
 from research_swarm.ui.sidebar import render_sidebar
@@ -129,10 +129,8 @@ def _ingest_documents(session_id: str, uploaded_pdfs: list, extra_urls: list[str
 # ── Graph streaming helpers ───────────────────────────────────────────────────
 
 def _apply_ui_settings(ui: dict) -> None:
-    """Push sidebar choices into the global settings singleton."""
-    settings.default_model_provider = ui["provider"]
-    settings.default_model_name     = ui["model"]
-    settings.max_sources             = ui["max_sources"]
+    """Apply only settings still consumed by lower-level shared components."""
+    settings.max_sources = ui["max_sources"]
     # If Ollama is selected, honour any custom base URL entered in the sidebar
     if ui["provider"] == "ollama" and ui.get("ollama_url"):
         settings.ollama_base_url = ui["ollama_url"]
@@ -321,7 +319,11 @@ def _render_query_form(ui: dict, graph) -> None:
             index=1,
             key="ui_audience",
         )
-        submitted = st.form_submit_button("🚀 Start Research", type="primary", use_container_width=True)
+        submitted = st.form_submit_button(
+            "🚀 Start Research",
+            type="primary",
+            use_container_width=True,
+        )
 
     if not submitted or not topic.strip():
         return
@@ -350,6 +352,8 @@ def _render_query_form(ui: dict, graph) -> None:
         "iteration_count": 0,
         "next_agent":     None,
         "session_id":     session_id,
+        "model_provider": ui["provider"],
+        "model_name":     ui["model"],
     }
 
     # Ingest user-supplied documents

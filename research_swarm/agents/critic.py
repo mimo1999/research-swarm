@@ -1,4 +1,4 @@
-"""Critic agent — reviews each Finding and assigns a verdict."""
+"""Critic agent -- reviews each Finding and assigns a verdict."""
 from __future__ import annotations
 
 import logging
@@ -18,9 +18,9 @@ _SYSTEM_PROMPT = """\
 You are a rigorous Research Critic. Your job is to evaluate each research finding
 and assign one of three verdicts:
 
-  supported — the claim is well-supported by the cited evidence
-  weak      — the claim needs more or stronger evidence
-  refuted   — the evidence contradicts or does not support the claim
+  supported -- the claim is well-supported by the cited evidence
+  weak      -- the claim needs more or stronger evidence
+  refuted   -- the evidence contradicts or does not support the claim
 
 Be concise. If the verdict is weak or refuted, suggest a specific follow-up
 research question in `suggested_followup`.
@@ -38,22 +38,28 @@ Assign a verdict.
 """
 
 
+def _field(obj, name: str, default=None):
+    return getattr(obj, name, obj.get(name, default) if isinstance(obj, dict) else default)
+
+
 async def run_critic(
-    state: "AgentState",
+    state: AgentState,
     llm: BaseChatModel,
 ) -> list[Critique]:
     """Review all findings that don't yet have a critique. Return new Critique objects."""
     findings: list[Finding] = state.get("findings") or []
     existing_critiques: list[Critique] = state.get("critiques") or []
 
-    reviewed_ids: set[str] = {
-        (c.finding_id if hasattr(c, "finding_id") else c.get("finding_id", ""))
-        for c in existing_critiques
-    }
+    latest_verdict_by_id: dict[str, str] = {}
+    for critique in existing_critiques:
+        fid = _field(critique, "finding_id", "")
+        verdict = _field(critique, "verdict", "")
+        latest_verdict_by_id[fid] = verdict.value if hasattr(verdict, "value") else str(verdict)
 
     to_review = [
         f for f in findings
-        if (f.id if hasattr(f, "id") else f.get("id", "")) not in reviewed_ids
+        if latest_verdict_by_id.get(_field(f, "id", ""))
+        != CritiqueVerdict.supported.value
     ]
 
     if not to_review:
@@ -65,11 +71,11 @@ async def run_critic(
     new_critiques: list[Critique] = []
 
     for finding in to_review:
-        fid = finding.id if hasattr(finding, "id") else finding.get("id", "")
-        claim = finding.claim if hasattr(finding, "claim") else finding.get("claim", "")
-        confidence = finding.confidence if hasattr(finding, "confidence") else finding.get("confidence", 0.5)
-        sub_q = finding.sub_question if hasattr(finding, "sub_question") else finding.get("sub_question", "")
-        evidence = finding.evidence if hasattr(finding, "evidence") else finding.get("evidence", [])
+        fid = _field(finding, "id", "")
+        claim = _field(finding, "claim", "")
+        confidence = _field(finding, "confidence", 0.5)
+        sub_q = _field(finding, "sub_question", "")
+        evidence = _field(finding, "evidence", [])
 
         evidence_summary = "; ".join(
             (e.snippet if hasattr(e, "snippet") else e.get("snippet", ""))[:150]

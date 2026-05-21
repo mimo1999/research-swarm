@@ -1,4 +1,4 @@
-"""Writer agent — synthesises validated findings into a FinalReport."""
+"""Writer agent -- synthesises validated findings into a FinalReport."""
 from __future__ import annotations
 
 import logging
@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from research_swarm.schemas import FinalReport, Finding, ReportSection, Source
+from research_swarm.schemas import FinalReport, ReportSection, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ def _format_findings(findings: list, ref_index: dict[str, int]) -> str:
 
 
 async def run_writer(
-    state: "AgentState",
+    state: AgentState,
     llm: BaseChatModel,
 ) -> FinalReport:
     """Generate a FinalReport from validated findings."""
@@ -90,13 +90,17 @@ async def run_writer(
     plan = state.get("plan")
     human_feedback = state.get("human_feedback") or "None provided."
 
-    # Filter: include supported findings + fact-checked weak ones (confidence ≥ 0.4)
-    refuted_ids: set[str] = set()
+    # Filter: include supported findings + fact-checked weak ones (confidence >= 0.4)
+    latest_verdict_by_id: dict[str, str] = {}
     for c in critiques:
         verdict = c.verdict if hasattr(c, "verdict") else c.get("verdict", "")
         fid = c.finding_id if hasattr(c, "finding_id") else c.get("finding_id", "")
-        if verdict == CritiqueVerdict.refuted:
-            refuted_ids.add(fid)
+        latest_verdict_by_id[fid] = verdict.value if hasattr(verdict, "value") else str(verdict)
+    refuted_ids = {
+        fid
+        for fid, verdict in latest_verdict_by_id.items()
+        if verdict == CritiqueVerdict.refuted.value
+    }
 
     valid_findings = [
         f for f in findings
@@ -105,7 +109,7 @@ async def run_writer(
     ]
 
     if not valid_findings:
-        logger.warning("Writer: no valid findings — producing empty report.")
+        logger.warning("Writer: no valid findings -- producing empty report.")
         return FinalReport(
             title=f"Research Report: {query.topic if query else 'Unknown'}",
             exec_summary="Insufficient evidence was gathered to produce a report.",
@@ -115,11 +119,11 @@ async def run_writer(
     ref_index = {r.url: i + 1 for i, r in enumerate(references)}
 
     sources_text = "\n".join(
-        f"[{i+1}] {r.url} — {r.title}" for i, r in enumerate(references)
+        f"[{i+1}] {r.url} -- {r.title}" for i, r in enumerate(references)
     )
     findings_text = _format_findings(valid_findings, ref_index)
     sub_questions = "\n".join(
-        f"  • {q}" for q in (plan.sub_questions if plan else [])
+        f"  - {q}" for q in (plan.sub_questions if plan else [])
     )
 
     system_msg = SystemMessage(
@@ -155,7 +159,11 @@ async def run_writer(
             ),
             sections=[
                 ReportSection(
-                    heading=f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "Finding"),
+                    heading=(
+                        f.sub_question
+                        if hasattr(f, "sub_question")
+                        else f.get("sub_question", "Finding")
+                    ),
                     body_md=f.claim if hasattr(f, "claim") else f.get("claim", ""),
                     citations=[],
                 )

@@ -1,4 +1,4 @@
-"""LangGraph node functions — one async function per agent."""
+"""LangGraph node functions -- one async function per agent."""
 from __future__ import annotations
 
 import logging
@@ -14,7 +14,7 @@ from research_swarm.agents.supervisor import run_supervisor
 from research_swarm.agents.writer import run_writer
 from research_swarm.config import settings
 from research_swarm.schemas.state import AgentState
-from research_swarm.tools import web_search, arxiv_search, fetch_url
+from research_swarm.tools import arxiv_search, fetch_url, web_search
 from research_swarm.tools.retriever_tool import build_retriever_tool
 
 logger = logging.getLogger(__name__)
@@ -30,24 +30,39 @@ def _get_researcher_tools():
     return tools
 
 
+def _get_state_llm(state: AgentState):
+    """Create the chat model requested by this run's state."""
+    return get_agent_llm(
+        provider=state.get("model_provider"),
+        model=state.get("model_name"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Node functions
 # ---------------------------------------------------------------------------
 
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
-    """Central router — decides which agent to invoke next."""
+    """Central router -- decides which agent to invoke next."""
     iteration = state.get("iteration_count", 0)
 
-    # Hard iteration cap (deterministic — no LLM call needed)
+    # Hard iteration cap (deterministic -- no LLM call needed)
     if iteration >= settings.max_iterations:
-        logger.warning("Iteration cap reached (%d) — forcing END.", settings.max_iterations)
+        logger.warning("Iteration cap reached (%d) -- forcing END.", settings.max_iterations)
         return {
             "next_agent": "end",
             "iteration_count": iteration + 1,
-            "messages": [AIMessage(content=f"[Supervisor] Iteration cap reached ({settings.max_iterations}). Ending session.")],
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"[Supervisor] Iteration cap reached "
+                        f"({settings.max_iterations}). Ending session."
+                    )
+                )
+            ],
         }
 
-    llm = get_agent_llm()
+    llm = _get_state_llm(state)
     decision = await run_supervisor(state, llm)
     logger.info("Supervisor decision: %s (iter %d)", decision.next_agent, iteration)
 
@@ -66,7 +81,7 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
 
 async def researcher_node(state: AgentState) -> dict[str, Any]:
     """Research sub-questions using web/arXiv/RAG tools; emit Findings."""
-    llm = get_agent_llm()
+    llm = _get_state_llm(state)
     tools = _get_researcher_tools()
     new_findings = await run_researcher(state, llm, tools)
 
@@ -81,7 +96,7 @@ async def researcher_node(state: AgentState) -> dict[str, Any]:
 
 async def critic_node(state: AgentState) -> dict[str, Any]:
     """Review findings and emit Critiques."""
-    llm = get_agent_llm()
+    llm = _get_state_llm(state)
     new_critiques = await run_critic(state, llm)
 
     logger.info("Critic produced %d critique(s).", len(new_critiques))
@@ -95,21 +110,26 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
 
 async def fact_checker_node(state: AgentState) -> dict[str, Any]:
     """Cross-check claims and update Finding confidence scores."""
-    llm = get_agent_llm()
+    llm = _get_state_llm(state)
     updated_findings = await run_fact_checker(state, llm)
 
     logger.info("FactChecker updated %d finding(s).", len(updated_findings))
     return {
         "findings": updated_findings,  # merge-by-id reducer will overwrite
         "messages": [
-            AIMessage(content=f"[FactChecker] Updated confidence on {len(updated_findings)} finding(s).")
+            AIMessage(
+                content=(
+                    f"[FactChecker] Updated confidence on "
+                    f"{len(updated_findings)} finding(s)."
+                )
+            )
         ],
     }
 
 
 async def writer_node(state: AgentState) -> dict[str, Any]:
     """Generate the FinalReport from validated findings."""
-    llm = get_agent_llm()
+    llm = _get_state_llm(state)
     report = await run_writer(state, llm)
 
     logger.info("Writer produced report: %r", report.title)

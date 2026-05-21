@@ -1,7 +1,6 @@
 """Agent trace renderer — live per-node status blocks during graph execution."""
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import streamlit as st
@@ -59,7 +58,11 @@ def _render_supervisor(u: dict) -> None:
     iter_n = u.get("iteration_count", "—")
     st.markdown(f"→ routing to **{next_a}** &nbsp;·&nbsp; iteration {iter_n}")
     if plan := u.get("plan"):
-        sub_qs = plan.sub_questions if hasattr(plan, "sub_questions") else plan.get("sub_questions", [])
+        sub_qs = (
+            plan.sub_questions
+            if hasattr(plan, "sub_questions")
+            else plan.get("sub_questions", [])
+        )
         if sub_qs:
             with st.expander(f"📋 Research plan ({len(sub_qs)} sub-questions)", expanded=False):
                 for i, q in enumerate(sub_qs, 1):

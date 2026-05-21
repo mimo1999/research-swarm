@@ -27,7 +27,7 @@ def _badge(label: str, score: float) -> str:
 
 # ── Main render function ──────────────────────────────────────────────────────
 
-def render_report(report: "FinalReport") -> None:
+def render_report(report: FinalReport) -> None:
     """Render a FinalReport in the Streamlit UI."""
     st.markdown(f"# {report.title}")
 
@@ -35,10 +35,22 @@ def render_report(report: "FinalReport") -> None:
     if report.quality_score:
         qs = report.quality_score
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Faithfulness",  f"{qs.faithfulness:.0%}",  help="Fraction of claims backed by citations")
-        c2.metric("Relevance",     f"{qs.relevance:.0%}",     help="Avg cosine similarity to sub-questions")
-        c3.metric("Completeness",  f"{qs.completeness:.0%}",  help="Fraction of sub-questions addressed")
-        c4.metric("Overall",       f"{qs.overall:.0%}",       delta=None)
+        c1.metric(
+            "Faithfulness",
+            f"{qs.faithfulness:.0%}",
+            help="Fraction of claims backed by citations",
+        )
+        c2.metric(
+            "Relevance",
+            f"{qs.relevance:.0%}",
+            help="Avg cosine similarity to sub-questions",
+        )
+        c3.metric(
+            "Completeness",
+            f"{qs.completeness:.0%}",
+            help="Fraction of sub-questions addressed",
+        )
+        c4.metric("Overall", f"{qs.overall:.0%}", delta=None)
         st.divider()
 
     # Executive summary
@@ -58,8 +70,16 @@ def render_report(report: "FinalReport") -> None:
             for i, ref in enumerate(report.references, 1):
                 title = ref.title if hasattr(ref, "title") else ref.get("title", "")
                 url   = ref.url   if hasattr(ref, "url")   else ref.get("url",   "")
-                cred  = ref.credibility_score if hasattr(ref, "credibility_score") else ref.get("credibility_score", 0)
-                stype = ref.source_type if hasattr(ref, "source_type") else ref.get("source_type", "")
+                cred = (
+                    ref.credibility_score
+                    if hasattr(ref, "credibility_score")
+                    else ref.get("credibility_score", 0)
+                )
+                stype = (
+                    ref.source_type
+                    if hasattr(ref, "source_type")
+                    else ref.get("source_type", "")
+                )
                 label = title or url
                 st.markdown(
                     f"**[{i}]** [{label}]({url})  \n"
@@ -88,7 +108,7 @@ def _inline_citations(body: str, citation_nums: list[int], references: list) -> 
     return body  # LLM already formats citations as [N]; no further processing needed
 
 
-def _render_downloads(report: "FinalReport") -> None:
+def _render_downloads(report: FinalReport) -> None:
     """Render Markdown and HTML download buttons."""
     st.markdown("#### ⬇️ Download Report")
     col1, col2 = st.columns(2)
@@ -117,7 +137,7 @@ def _safe_filename(title: str) -> str:
     return safe.strip()[:60] or "report"
 
 
-def _report_to_markdown(report: "FinalReport") -> str:
+def _report_to_markdown(report: FinalReport) -> str:
     lines = [f"# {report.title}", "", report.exec_summary, ""]
 
     for section in report.sections:
@@ -155,11 +175,23 @@ def _report_to_html(md_text: str, title: str) -> str:
           <meta name="viewport" content="width=device-width, initial-scale=1.0">
           <title>{title}</title>
           <style>
-            body {{ font-family: Georgia, serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; line-height: 1.7; color: #222; }}
+            body {{
+              font-family: Georgia, serif;
+              max-width: 860px;
+              margin: 2rem auto;
+              padding: 0 1rem;
+              line-height: 1.7;
+              color: #222;
+            }}
             h1 {{ border-bottom: 2px solid #333; padding-bottom: .4rem; }}
             h2 {{ margin-top: 2rem; color: #444; }}
             a  {{ color: #1a73e8; }}
-            blockquote {{ border-left: 4px solid #ccc; margin: 0; padding-left: 1rem; color: #555; }}
+            blockquote {{
+              border-left: 4px solid #ccc;
+              margin: 0;
+              padding-left: 1rem;
+              color: #555;
+            }}
             code {{ background: #f5f5f5; padding: .1em .3em; border-radius: 3px; }}
             pre  {{ background: #f5f5f5; padding: 1rem; overflow-x: auto; }}
           </style>

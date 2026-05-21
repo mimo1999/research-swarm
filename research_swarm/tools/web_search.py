@@ -1,11 +1,13 @@
-"""Tavily web search tool — returns a list of Source objects."""
-from typing import Annotated
+"""Tavily web search tool -- returns a list of Source objects."""
+import structlog
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
 
 from research_swarm.config import settings
 from research_swarm.schemas.source import Source, SourceType
+
+logger = structlog.get_logger(__name__)
 
 
 class WebSearchInput(BaseModel):
@@ -44,8 +46,22 @@ def web_search(query: str, max_results: int = 5, search_depth: str = "basic") ->
             include_answer=False,
             include_raw_content=False,
         )
-    except Exception:
-        return []
+    except Exception as exc:
+        logger.warning(
+            "web_search failed",
+            query=query,
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
+        return [
+            Source(
+                url=f"tavily://search/{query}",
+                title="Web search unavailable",
+                snippet=f"[Search error: {type(exc).__name__}]",
+                source_type=SourceType.web,
+                credibility_score=0.0,
+            ).model_dump(mode="json")
+        ]
     sources: list[dict] = []
     for r in response.get("results", []):
         source = Source(

@@ -1,4 +1,4 @@
-"""Researcher agent — tool-calling ReAct loop that produces Finding objects."""
+"""Researcher agent -- tool-calling ReAct loop that produces Finding objects."""
 from __future__ import annotations
 
 import json
@@ -25,16 +25,16 @@ You are an expert Research Agent. Your goal is to answer a research sub-question
 by calling the available tools to gather evidence, then synthesising your findings.
 
 Available tools:
-  web_search      — search the web (Tavily)
-  arxiv_search    — search arXiv preprints
-  fetch_url       — fetch and extract text from a URL
-  retrieve_from_rag — query documents already ingested into the session RAG index
+  web_search      -- search the web (Tavily)
+  arxiv_search    -- search arXiv preprints
+  fetch_url       -- fetch and extract text from a URL
+  retrieve_from_rag -- query documents already ingested into the session RAG index
 
 Strategy:
 1. Start with retrieve_from_rag to check if the answer is already in the session corpus.
 2. Use web_search and arxiv_search for fresh information.
 3. Fetch promising URLs for detail.
-4. Stop calling tools once you have enough evidence (3–5 good sources).
+4. Stop calling tools once you have enough evidence (3-5 good sources).
 
 Session ID (required for retrieve_from_rag): {session_id}
 Audience: {audience}
@@ -45,8 +45,8 @@ Based on the evidence gathered above, write a concise, factual claim that direct
 answers the sub-question: "{sub_question}"
 
 Return ONLY a JSON object with these fields:
-  claim       — one or two sentences summarising the answer
-  confidence  — float 0.0–1.0 reflecting how well the evidence supports the claim
+  claim       -- one or two sentences summarising the answer
+  confidence  -- float 0.0-1.0 reflecting how well the evidence supports the claim
 """
 
 
@@ -120,7 +120,7 @@ def _extract_sources_from_messages(messages: list[Any]) -> list[Source]:
 
 
 async def run_researcher(
-    state: "AgentState",
+    state: AgentState,
     llm: BaseChatModel,
     tools: list[BaseTool],
 ) -> list[Finding]:
@@ -132,7 +132,7 @@ async def run_researcher(
     """
     plan = state.get("plan")
     if not plan:
-        logger.warning("Researcher called with no plan — skipping.")
+        logger.warning("Researcher called with no plan -- skipping.")
         return []
 
     session_id = state.get("session_id", "default")
@@ -159,7 +159,7 @@ async def run_researcher(
     targets = [q for q in plan.sub_questions if q not in ok_sub_questions]
 
     if not targets:
-        logger.info("All sub-questions already well-supported — nothing to research.")
+        logger.info("All sub-questions already well-supported -- nothing to research.")
         return []
 
     # Set up tools
@@ -198,7 +198,7 @@ async def run_researcher(
                 confidence=0.2,
             )
 
-        # Check if this sub-question already has a finding (re-research → overwrite by id)
+        # Check if this sub-question already has a finding (re-research -> overwrite by id)
         existing_id: str | None = None
         for f in existing_findings:
             sub_key = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")

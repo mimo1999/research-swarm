@@ -1,4 +1,5 @@
 from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,13 +30,13 @@ class Settings(BaseSettings):
     max_sources: int = 15
     data_dir: Path = Path("data")
 
-    # Local RAG — embeddings (HuggingFace, runs fully on CPU)
+    # Local RAG -- embeddings (HuggingFace, runs fully on CPU)
     embed_model_name: str = "BAAI/bge-small-en-v1.5"
-    embed_cache_dir: str = ""          # empty → ~/.cache/huggingface
+    embed_cache_dir: str = ""          # empty -> ~/.cache/huggingface
     chunk_size: int = 512
     chunk_overlap: int = 50
 
-    # Local RAG — LLM for routing / decomposition (Ollama, optional)
+    # Local RAG -- LLM for routing / decomposition (Ollama, optional)
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma4:e2b"
     ollama_timeout: float = 120.0      # seconds

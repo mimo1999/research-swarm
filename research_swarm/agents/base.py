@@ -1,6 +1,6 @@
-"""LLM factory — returns a LangChain ChatModel for use in agents."""
-from langchain_core.language_models import BaseChatModel
+"""LLM factory -- returns a LangChain ChatModel for use in agents."""
 from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from research_swarm.config import settings
@@ -14,9 +14,9 @@ def get_agent_llm(
     """Return a ChatModel for the given provider / model.
 
     Supported providers:
-      - ``"anthropic"``  — Claude via Anthropic API
-      - ``"openai"``     — GPT via OpenAI API
-      - ``"ollama"``     — local model via Ollama (no cloud, no API key)
+      - ``"anthropic"``  -- Claude via Anthropic API
+      - ``"openai"``     -- GPT via OpenAI API
+      - ``"ollama"``     -- local model via Ollama (no cloud, no API key)
 
     Defaults to ``settings.default_model_provider`` and
     ``settings.default_model_name`` when not specified.
@@ -39,7 +39,7 @@ def get_agent_llm(
         )
 
     if provider == "ollama":
-        # langchain_ollama.ChatOllama — no API key required,
+        # langchain_ollama.ChatOllama -- no API key required,
         # all inference runs locally via the Ollama server.
         from langchain_ollama import ChatOllama  # lazy import
         return ChatOllama(

@@ -5,7 +5,6 @@ are needed and tests run fully offline.
 """
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -13,13 +12,12 @@ import pytest
 from research_swarm.schemas import (
     Critique,
     CritiqueVerdict,
-    Finding,
     FinalReport,
+    Finding,
     ResearchPlan,
     ResearchQuery,
 )
 from research_swarm.schemas.state import AgentState
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -108,8 +106,8 @@ class TestFindingsMergeReducer:
 
 class TestRoutingEdge:
     def _route(self, next_agent: str) -> str:
+
         from research_swarm.graph.edges import route_from_supervisor
-        from langgraph.graph import END
         state = _make_state(next_agent=next_agent)
         result = route_from_supervisor(state)
         return result
@@ -292,12 +290,14 @@ class TestWriterNode:
 class TestGraphBuilder:
     def test_builds_without_error(self):
         from langgraph.checkpoint.memory import MemorySaver
+
         from research_swarm.graph.builder import build_graph
         graph = build_graph(checkpointer=MemorySaver(), interrupt_before_writer=False)
         assert graph is not None
 
     def test_interrupt_before_writer_compiles(self):
         from langgraph.checkpoint.memory import MemorySaver
+
         from research_swarm.graph.builder import build_graph
         graph = build_graph(checkpointer=MemorySaver(), interrupt_before_writer=True)
         assert graph is not None
@@ -314,8 +314,9 @@ class TestGraphBuilder:
         Uses patch.object so the lambdas in builder.py pick up the mocks and
         the originals are always restored, even on test failure.
         """
-        import research_swarm.graph.nodes as _nodes
         from langgraph.checkpoint.memory import MemorySaver
+
+        import research_swarm.graph.nodes as _nodes
 
         call_log: list[str] = []
 
@@ -551,8 +552,9 @@ class TestAsyncCheckpointer:
     @pytest.mark.asyncio
     async def test_astream_works_with_memory_saver(self):
         """MemorySaver supports both sync and async — astream must not raise."""
-        import research_swarm.graph.nodes as _nodes
         from langgraph.checkpoint.memory import MemorySaver
+
+        import research_swarm.graph.nodes as _nodes
         from research_swarm.graph.builder import build_graph, get_thread_config
 
         async def fake_supervisor(state):
@@ -578,6 +580,7 @@ class TestAsyncCheckpointer:
         """
         import aiosqlite
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
         import research_swarm.graph.nodes as _nodes
         from research_swarm.graph.builder import build_graph, get_thread_config
 
@@ -605,7 +608,9 @@ class TestAsyncCheckpointer:
         This test proves WHY we cannot use SqliteSaver in production.
         """
         import sqlite3
+
         from langgraph.checkpoint.sqlite import SqliteSaver
+
         import research_swarm.graph.nodes as _nodes
         from research_swarm.graph.builder import build_graph, get_thread_config
 
@@ -629,6 +634,7 @@ class TestAsyncCheckpointer:
     def test_default_build_graph_uses_memory_saver(self):
         """build_graph() with no args uses MemorySaver — not SqliteSaver."""
         from langgraph.checkpoint.memory import MemorySaver
+
         from research_swarm.graph.builder import build_graph
         graph = build_graph()
         assert isinstance(graph.checkpointer, MemorySaver)
@@ -637,6 +643,7 @@ class TestAsyncCheckpointer:
     async def test_make_async_checkpointer_returns_async_sqlite_saver(self):
         """make_async_checkpointer() must return an AsyncSqliteSaver instance."""
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
         from research_swarm.graph.builder import make_async_checkpointer
         saver = await make_async_checkpointer()
         assert isinstance(saver, AsyncSqliteSaver)
@@ -667,14 +674,14 @@ class TestResearchPipeline:
         network calls, or LLM inference is needed.
         """
         from langgraph.checkpoint.memory import MemorySaver
+
         from research_swarm.agents.supervisor import SupervisorDecision
         from research_swarm.graph.builder import build_graph, get_thread_config
         from research_swarm.schemas import (
-            Critique,
             CritiqueVerdict,
             FinalReport,
-            ResearchQuery,
             ReportSection,
+            ResearchQuery,
         )
 
         # ── Fixtures ──────────────────────────────────────────────────
@@ -794,6 +801,7 @@ class TestHITLInterruptResume:
     async def test_graph_pauses_before_writer(self):
         """With interrupt_before_writer=True the graph must stop before writer."""
         from langgraph.checkpoint.memory import MemorySaver
+
         from research_swarm.agents.supervisor import SupervisorDecision
         from research_swarm.graph.builder import build_graph, get_thread_config
 
@@ -834,6 +842,7 @@ class TestHITLInterruptResume:
     async def test_graph_resumes_and_writer_fires_after_approval(self):
         """After aupdate_state with human feedback, resuming must invoke the writer."""
         from langgraph.checkpoint.memory import MemorySaver
+
         from research_swarm.agents.supervisor import SupervisorDecision
         from research_swarm.graph.builder import build_graph, get_thread_config
 

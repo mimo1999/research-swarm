@@ -1,19 +1,20 @@
 """Unit tests for Phase 1 Pydantic schemas."""
-import pytest
 from datetime import datetime
+
+import pytest
 from pydantic import ValidationError
+
 from research_swarm.schemas import (
-    ResearchQuery,
-    ResearchDepth,
-    Source,
-    SourceType,
-    ResearchPlan,
-    Finding,
     Critique,
     CritiqueVerdict,
-    ReportSection,
     FinalReport,
+    Finding,
     ReportQualityScore,
+    ResearchDepth,
+    ResearchPlan,
+    ResearchQuery,
+    Source,
+    SourceType,
 )
 from research_swarm.schemas.state import AgentState
 

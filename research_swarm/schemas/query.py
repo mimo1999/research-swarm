@@ -1,8 +1,9 @@
-from enum import Enum
+from enum import StrEnum
+
 from pydantic import BaseModel, Field
 
 
-class ResearchDepth(str, Enum):
+class ResearchDepth(StrEnum):
     shallow = "shallow"
     standard = "standard"
     deep = "deep"

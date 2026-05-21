@@ -1,6 +1,6 @@
 from .builder import build_graph, get_thread_config
 from .edges import route_from_supervisor
-from .state import AgentState, AgentName
+from .state import AgentName, AgentState
 
 __all__ = [
     "build_graph",

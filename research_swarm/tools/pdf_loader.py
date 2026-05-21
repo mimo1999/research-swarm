@@ -1,12 +1,10 @@
-"""PDF loader tool — extracts text from a local PDF file with page metadata."""
+"""PDF loader tool -- extracts text from a local PDF file with page metadata."""
 import textwrap
 from pathlib import Path
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
-
-from research_swarm.schemas.source import Source, SourceType
 
 
 class PDFChunk(BaseModel):
@@ -65,7 +63,7 @@ def load_pdf(file_path: str, max_pages: int = 50, snippet_chars: int = 500) -> d
 
         # Build a combined snippet from the first few pages
         combined = " ".join(c.text for c in chunks[:5])
-        snippet = textwrap.shorten(combined, width=snippet_chars * 3, placeholder="…")
+        snippet = textwrap.shorten(combined, width=snippet_chars * 3, placeholder="...")
 
         # Attempt to extract title from PDF metadata
         meta = reader.metadata or {}

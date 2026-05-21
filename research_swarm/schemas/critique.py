@@ -1,8 +1,9 @@
-from enum import Enum
+from enum import StrEnum
+
 from pydantic import BaseModel, Field
 
 
-class CritiqueVerdict(str, Enum):
+class CritiqueVerdict(StrEnum):
     supported = "supported"
     weak = "weak"
     refuted = "refuted"

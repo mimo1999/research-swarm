@@ -7,9 +7,9 @@ from typing import Any
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+import research_swarm.graph.nodes as _nodes
 from research_swarm.config import settings
 from research_swarm.graph.edges import route_from_supervisor
-import research_swarm.graph.nodes as _nodes
 from research_swarm.schemas.state import AgentState
 
 
@@ -39,7 +39,7 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
     All graph nodes are async, so the caller is responsible for supplying an
     async-compatible checkpointer (AsyncSqliteSaver in production, MemorySaver
     in tests).  Passing no checkpointer falls back to an in-memory MemorySaver
-    — state is not persisted across Python processes in that case.
+    -- state is not persisted across Python processes in that case.
 
     Args:
         checkpointer: Any LangGraph checkpointer.  Omit only for quick tests
@@ -56,7 +56,7 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
 
     sg = StateGraph(AgentState)
 
-    # Register nodes via module reference — evaluated at build_graph() call time so
+    # Register nodes via module reference -- evaluated at build_graph() call time so
     # unittest.mock patches applied before calling build_graph() are picked up.
     sg.add_node("supervisor",   _nodes.supervisor_node)
     sg.add_node("researcher",   _nodes.researcher_node)

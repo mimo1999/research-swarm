@@ -1,7 +1,7 @@
-from .sidebar import render_sidebar
-from .trace import render_node_update, render_trace_header
 from .report_view import render_report
 from .sessions_view import render_sessions_tab
+from .sidebar import render_sidebar
+from .trace import render_node_update, render_trace_header
 
 __all__ = [
     "render_sidebar",

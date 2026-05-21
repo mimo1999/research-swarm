@@ -2,33 +2,32 @@
 
 Returns the best available query engine for a session:
 
-  Ollama reachable → RouterQueryEngine
-      ├── VectorQueryEngine  (specific facts, similarity search)
-      └── SummaryQueryEngine (high-level overview, broad questions)
-       └── with SubQuestionQueryEngine wrapper for complex multi-part queries
+  Ollama reachable -> RouterQueryEngine
+      +--- VectorQueryEngine  (specific facts, similarity search)
+      +--- SummaryQueryEngine (high-level overview, broad questions)
+       +--- with SubQuestionQueryEngine wrapper for complex multi-part queries
 
-  Ollama not reachable → plain VectorQueryEngine
-      (response_mode="no_text" — returns source nodes; no LLM synthesis)
+  Ollama not reachable -> plain VectorQueryEngine
+      (response_mode="no_text" -- returns source nodes; no LLM synthesis)
 
-All computation is fully local — embeddings via HuggingFace, LLM via Ollama.
+All computation is fully local -- embeddings via HuggingFace, LLM via Ollama.
 The research agent's own LLM handles final synthesis; this layer only retrieves.
 """
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
 
 import httpx
 from llama_index.core import SummaryIndex, VectorStoreIndex
-from llama_index.core.base.llms.base import BaseLLM
 from llama_index.core.base.base_query_engine import BaseQueryEngine
+from llama_index.core.base.llms.base import BaseLLM
 from llama_index.core.query_engine import RouterQueryEngine, SubQuestionQueryEngine
 from llama_index.core.selectors import LLMSingleSelector
 from llama_index.core.tools import QueryEngineTool
 from llama_index.llms.ollama import Ollama
 
 from research_swarm.config import settings
-from research_swarm.rag.indexes import build_summary_index, get_embed_model, load_vector_index
+from research_swarm.rag.indexes import build_summary_index, load_vector_index
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +52,7 @@ def get_local_llm() -> BaseLLM | None:
     """Return an Ollama LLM instance if Ollama is running, else None."""
     if not probe_ollama():
         logger.warning(
-            "Ollama not reachable at %s — routing and decomposition disabled.",
+            "Ollama not reachable at %s -- routing and decomposition disabled.",
             settings.ollama_base_url,
         )
         return None
@@ -71,8 +70,8 @@ def get_local_llm() -> BaseLLM | None:
 def _vector_query_engine(index: VectorStoreIndex, llm: BaseLLM | None) -> BaseQueryEngine:
     """Build a vector query engine.
 
-    With LLM  → response_mode="compact" (LLM summarises retrieved chunks).
-    Without   → response_mode="no_text"  (returns raw source nodes only).
+    With LLM  -> response_mode="compact" (LLM summarises retrieved chunks).
+    Without   -> response_mode="no_text"  (returns raw source nodes only).
     """
     if llm is not None:
         return index.as_query_engine(
@@ -81,7 +80,6 @@ def _vector_query_engine(index: VectorStoreIndex, llm: BaseLLM | None) -> BaseQu
             response_mode="compact",
         )
     return index.as_query_engine(
-        embed_model=get_embed_model(),
         similarity_top_k=settings.max_sources,
         response_mode="no_text",
     )
@@ -148,8 +146,8 @@ def get_research_query_engine(session_id: str) -> BaseQueryEngine:
     """Return the best available query engine for the given session.
 
     Checks whether Ollama is reachable and builds accordingly:
-      - Ollama UP  → SubQuestionQueryEngine(RouterQueryEngine(vector, summary))
-      - Ollama DOWN → plain VectorQueryEngine with response_mode="no_text"
+      - Ollama UP  -> SubQuestionQueryEngine(RouterQueryEngine(vector, summary))
+      - Ollama DOWN -> plain VectorQueryEngine with response_mode="no_text"
 
     The returned engine is safe to call with `.query(question_str)`.
     Source nodes are always available on the response via `.source_nodes`.
@@ -161,7 +159,10 @@ def get_research_query_engine(session_id: str) -> BaseQueryEngine:
         logger.info("Building vector-only query engine for session '%s'.", session_id)
         return _vector_query_engine(vector_index, llm=None)
 
-    logger.info("Ollama available — building full Router+SubQuestion engine for session '%s'.", session_id)
+    logger.info(
+        "Ollama available -- building full Router+SubQuestion engine for session '%s'.",
+        session_id,
+    )
 
     vector_engine = _vector_query_engine(vector_index, llm)
     summary_index = build_summary_index(session_id, llm, documents=None)

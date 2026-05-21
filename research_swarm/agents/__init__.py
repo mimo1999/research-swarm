@@ -1,8 +1,8 @@
 from .base import get_agent_llm
-from .supervisor import run_supervisor, SupervisorDecision
-from .researcher import run_researcher
 from .critic import run_critic
 from .fact_checker import run_fact_checker
+from .researcher import run_researcher
+from .supervisor import SupervisorDecision, run_supervisor
 from .writer import run_writer
 
 __all__ = [
