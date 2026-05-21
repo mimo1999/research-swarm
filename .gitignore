@@ -1,0 +1,97 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.whl
+.venv/
+venv/
+env/
+
+# ── Testing / linting ─────────────────────────────────────────────────────────
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+cassettes/          # VCR cassettes with recorded API responses
+
+# ── Runtime data (generated at run-time, not source) ─────────────────────────
+# SQLite checkpoints + per-session Chroma indexes
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# .env contains API keys — NEVER commit
+.env
+# .env.example is committed (template without real keys)
+
+# ── AI agent / IDE tooling ────────────────────────────────────────────────────
+# Claude Code
+.claude/
+CLAUDE.md
+
+# Cursor
+.cursor/
+.cursorignore
+.cursorindexingignore
+
+# GitHub Copilot
+.copilot/
+.github/copilot-instructions.md
+
+# Continue
+.continue/
+
+# Windsurf / Codeium
+.codeium/
+.windsurf/
+
+# Aider
+.aider*
+aider.conf.yml
+
+# Devin
+.devin/
+
+# General AI tool artifacts
+*.prompt
+*.prompts/
+.ai/
+
+# ── OS / IDE ──────────────────────────────────────────────────────────────────
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.iws
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.bak
+*.swp
+*.orig
