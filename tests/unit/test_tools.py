@@ -21,6 +21,19 @@ def _make_pdf_bytes(pages: list[str]) -> bytes:
 # ── web_search ────────────────────────────────────────────────────────────────
 
 class TestWebSearch:
+    def setup_method(self):
+        # Reset the module-level TavilyClient singleton so each test gets a
+        # fresh mock when patching TavilyClient.
+        #
+        # NOTE: `import research_swarm.tools.web_search as ws` resolves to the
+        # StructuredTool object (because __init__.py shadows the submodule name)
+        # rather than the module.  Use sys.modules to get the real module object.
+        import sys
+        ws = sys.modules.get("research_swarm.tools.web_search")
+        if ws is not None:
+            ws._tavily_client = None
+            ws._tavily_key_cache = ""
+
     def _make_tavily_result(self, url: str, title: str, content: str) -> dict:
         return {"url": url, "title": title, "content": content}
 
@@ -226,8 +239,9 @@ class TestURLFetcher:
 
         from research_swarm.tools.url_fetcher import fetch_url
         result = fetch_url.invoke({"url": "https://example.com/file.pdf"})
-        assert "Non-HTML" in result["snippet"]
-        assert result["credibility_score"] == 0.5
+        # PDF responses now get a descriptive note rather than a generic Non-HTML message
+        assert "PDF" in result["snippet"]
+        assert result["credibility_score"] == 0.3
 
     @patch("research_swarm.tools.url_fetcher.httpx.get")
     def test_http_error_returns_error_source(self, mock_get):

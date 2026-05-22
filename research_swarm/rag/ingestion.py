@@ -10,7 +10,6 @@ All computation is local:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import chromadb
 from llama_index.core import Document, StorageContext, VectorStoreIndex
@@ -18,23 +17,10 @@ from llama_index.core.node_parser import SentenceSplitter
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
 from research_swarm.config import settings
+from research_swarm.rag._chroma import collection_name as _collection_name
+from research_swarm.rag._chroma import session_chroma_path as _session_chroma_path
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _session_chroma_path(session_id: str) -> Path:
-    path = settings.sessions_dir / session_id / "chroma"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _collection_name(session_id: str) -> str:
-    # Chroma collection names must be 3-63 chars, alphanumeric + hyphens.
-    safe = "".join(c if c.isalnum() or c == "-" else "-" for c in session_id)
-    return f"rs-{safe}"[:63]
 
 
 def _make_splitter() -> SentenceSplitter:

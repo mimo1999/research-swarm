@@ -68,7 +68,7 @@ START
 |-------|------|---------------|
 | **Supervisor** | `agents/supervisor.py` | Reads the full state, decides the next agent to call, produces the research plan on the first pass. Enforces `MAX_ITERATIONS`. |
 | **Researcher** | `agents/researcher.py` | Runs a ReAct tool-calling loop (up to 6 turns) for each un-answered sub-question. Synthesises a `Finding` (claim + confidence + evidence) from the gathered messages. Skips sub-questions already marked `supported` by the Critic. |
-| **Critic** | `agents/critic.py` | Reviews each un-critiqued `Finding` and returns a `Critique` with a `supported / weak / refuted` verdict. Stamps the real `finding_id` over any hallucinated ID from the LLM. Falls back to `weak` if the LLM call fails. |
+| **Critic** | `agents/critic.py` | Reviews each un-critiqued `Finding` and returns a `Critique` with a `supported / weak / refuted` verdict. Stamps the real `finding_id` over any hallucinated ID from the LLM. Falls back to `supported` on LLM failure to avoid triggering expensive re-research loops. |
 | **Fact-Checker** | `agents/fact_checker.py` | Cross-checks every non-refuted `Finding` against its cited source snippets and adjusts the confidence score. Penalises findings with no evidence to `0.1`. |
 | **Writer** | `agents/writer.py` | Synthesises validated findings into a `FinalReport` with sections, references, methodology, and limitations. Falls back to a minimal report if the LLM fails. Optionally incorporates human feedback. |
 
@@ -89,7 +89,7 @@ START
 | Checkpointing | `AsyncSqliteSaver` (LangGraph) + `aiosqlite` |
 | Data validation | [Pydantic](https://docs.pydantic.dev/) v2 |
 | Packaging | [Poetry](https://python-poetry.org/) |
-| Tests | pytest · pytest-asyncio (154 tests, fully offline) |
+| Tests | pytest · pytest-asyncio (157 tests, fully offline) |
 
 ---
 
@@ -121,16 +121,20 @@ swarm_agent_project/
 │   │   └── edges.py              # route_from_supervisor() conditional edge
 │   │
 │   ├── rag/
+│   │   ├── _chroma.py            # Shared Chroma path + collection-name helpers
 │   │   ├── indexes.py            # get_embed_model() (cached HuggingFace)
 │   │   ├── ingestion.py          # IngestionPipeline (PDF / URL / text)
 │   │   └── query_engines.py      # VectorStore + SubQuestion engines
 │   │
 │   ├── tools/
-│   │   ├── web_search.py         # Tavily search → list[Source]
+│   │   ├── web_search.py         # Tavily search → list[Source] (singleton client)
 │   │   ├── arxiv_tool.py         # arXiv search → list[Source]
-│   │   ├── url_fetcher.py        # httpx + BeautifulSoup readability
+│   │   ├── url_fetcher.py        # httpx + BeautifulSoup readability (SSRF-safe)
 │   │   ├── pdf_loader.py         # pypdf page chunker
 │   │   └── retriever_tool.py     # LlamaIndex query engine wrapper
+│   │
+│   ├── utils/
+│   │   └── security.py           # URL validation, SSRF blocklist, content sanitiser
 │   │
 │   ├── schemas/
 │   │   ├── state.py              # AgentState TypedDict + custom reducers
@@ -157,10 +161,11 @@ swarm_agent_project/
 │
 ├── tests/
 │   └── unit/
-│       ├── test_schemas.py       # Pydantic schema validation (14 tests)
-│       ├── test_tools.py         # Tools layer with mocked network (30 tests)
-│       ├── test_graph.py         # Graph nodes, edges, HITL, pipeline (53 tests)
+│       ├── test_schemas.py       # Pydantic schema validation (12 tests)
+│       ├── test_tools.py         # Tools layer with mocked network (22 tests)
+│       ├── test_graph.py         # Graph nodes, edges, HITL, pipeline (44 tests)
 │       ├── test_db.py            # SQLite persistence layer (25 tests)
+│       ├── test_rag.py           # RAG ingestion, indexes, query engines (20 tests)
 │       └── test_agents.py        # Direct agent function tests (34 tests)
 │
 └── data/                         # Runtime only — gitignored
@@ -243,7 +248,7 @@ Enable **Human review before writing** in the sidebar. The graph will pause befo
 
 - The current findings and critic verdicts are displayed.
 - You can **Approve & Write** (with optional feedback), **Edit & Re-research** (sends the swarm back to the Researcher), or **Discard Session**.
-- Human feedback is injected into the Writer's prompt when the graph resumes.
+- Writer-specific feedback travels through a dedicated `writer_instructions` state channel so it never interferes with the Researcher's `human_feedback` channel (which triggers a new research pass).
 
 ---
 
@@ -265,7 +270,7 @@ Every research run is checkpointed to `data/checkpoints/sessions.db` (SQLite via
 
 ## Running Tests
 
-All 154 tests run fully offline — no API keys, no network calls, all LLMs mocked.
+All 157 tests run fully offline — no API keys, no network calls, all LLMs mocked.
 
 ```bash
 # Full suite

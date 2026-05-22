@@ -10,7 +10,12 @@ class ResearchDepth(StrEnum):
 
 
 class ResearchQuery(BaseModel):
-    topic: str = Field(..., description="The research topic or question")
+    topic: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description="The research topic or question",
+    )
     depth: ResearchDepth = Field(
         default=ResearchDepth.standard,
         description="How deeply to research the topic",

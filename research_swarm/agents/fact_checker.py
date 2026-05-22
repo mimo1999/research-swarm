@@ -8,7 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from research_swarm.agents._utils import _field, _latest_verdicts
+from research_swarm.agents._utils import _field, _latest_verdicts, json_output_instruction
 from research_swarm.schemas import Finding
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -17,20 +17,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """\
-You are a meticulous Fact-Checker. Given a research claim and its source evidence,
-score the factual accuracy of the claim on a scale of 0.0 (completely unsupported)
-to 1.0 (fully corroborated by multiple sources).
-
-Consider:
-  - Does each cited source actually contain text supporting the claim?
-  - Is the claim an overstatement or misrepresentation of the evidence?
-  - Are there contradictions between sources?
-
-Return only a JSON object with:
-  confidence_score  -- float 0.0-1.0
-  notes             -- one sentence explaining your assessment
-"""
+_SYSTEM_PROMPT = (
+    "You are a meticulous Fact-Checker. Given a research claim and its source evidence,"
+    " score the factual accuracy of the claim on a scale of 0.0 (completely unsupported)"
+    " to 1.0 (fully corroborated by multiple sources).\n\n"
+    "Consider:\n"
+    "  - Does each cited source actually contain text supporting the claim?\n"
+    "  - Is the claim an overstatement or misrepresentation of the evidence?\n"
+    "  - Are there contradictions between sources?"
+    + json_output_instruction({
+        "confidence_score": 0.0,
+        "notes": "<one sentence explaining your assessment>",
+    })
+)
 
 _CLAIM_TEMPLATE = """\
 Claim: {claim}

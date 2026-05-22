@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from research_swarm.schemas.source import Source, SourceType
+from research_swarm.utils.security import sanitize_fetched_content
 
 
 class ArxivSearchInput(BaseModel):
@@ -33,7 +34,7 @@ def _extract_pdf_snippet(pdf_url: str, max_chars: int = 800) -> str:
                 break
         return textwrap.shorten(text.strip(), width=max_chars, placeholder="...")
     except Exception:
-        return ""
+        return ""  # non-fatal — abstract snippet is still available
 
 
 @tool("arxiv_search", args_schema=ArxivSearchInput)
@@ -68,11 +69,11 @@ def arxiv_search(
         abstract_snippet = textwrap.shorten(
             result.summary.replace("\n", " "), width=600, placeholder="..."
         )
-        snippet = abstract_snippet
+        snippet = sanitize_fetched_content(abstract_snippet)
         if fetch_pdf_text:
             pdf_snippet = _extract_pdf_snippet(result.pdf_url)
             if pdf_snippet:
-                snippet = pdf_snippet
+                snippet = sanitize_fetched_content(pdf_snippet)
 
         source = Source(
             url=result.entry_id,

@@ -163,15 +163,35 @@ class TestSupervisorNode:
         assert len(result["messages"]) == 1
 
     @pytest.mark.asyncio
-    async def test_iteration_cap_forces_end(self, monkeypatch):
+    async def test_iteration_cap_forces_fact_checker(self, monkeypatch):
+        """When the hard step ceiling (max_iterations * 4) is reached the
+        supervisor must force fact_checker regardless of state, without
+        calling the LLM.
+        """
         from research_swarm.config import settings
         monkeypatch.setattr(settings, "max_iterations", 3)
+        # ceiling = 3 * 4 = 12; any iteration_count >= 12 triggers it
+        CEILING = settings.max_iterations * 4
 
         from research_swarm.graph.nodes import supervisor_node
-        state = _make_state(iteration_count=3)
+
+        # Provide a plan with findings/critiques so _route_from_state sees a
+        # fully-initialised session — the ceiling check must fire before any
+        # other branch.
+        f = _make_finding("q1")
+        c = _make_critique(f.id, CritiqueVerdict.weak)
+        state = _make_state(
+            plan=_make_plan(),
+            findings=[f],
+            critiques=[c],
+            iteration_count=CEILING,
+            next_agent="researcher",
+        )
         result = await supervisor_node(state)
 
-        assert result["next_agent"] == "end"
+        # Ceiling forces fact_checker; the LLM must NOT have been called
+        # (no AuthenticationError noise in test output).
+        assert result["next_agent"] == "fact_checker"
 
     @pytest.mark.asyncio
     async def test_no_plan_in_update_when_plan_exists(self):

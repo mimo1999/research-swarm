@@ -25,8 +25,9 @@ def session_id(tmp_path, monkeypatch):
         p.mkdir(parents=True, exist_ok=True)
         return p
 
-    monkeypatch.setattr("research_swarm.rag.ingestion._session_chroma_path", _fake_chroma_path)
-    monkeypatch.setattr("research_swarm.rag.indexes._session_chroma_path", _fake_chroma_path)
+    # Both ingestion and indexes now import from rag._chroma — patch the
+    # canonical location so both modules pick up the fake automatically.
+    monkeypatch.setattr("research_swarm.rag._chroma.session_chroma_path", _fake_chroma_path)
     return "test-session-001"
 
 
@@ -252,7 +253,7 @@ class TestLoadVectorIndex:
             p = tmp_path / "sessions" / sid / "chroma"
             p.mkdir(parents=True, exist_ok=True)
             return p
-        monkeypatch.setattr("research_swarm.rag.indexes._session_chroma_path", _fake_path)
+        monkeypatch.setattr("research_swarm.rag._chroma.session_chroma_path", _fake_path)
 
         mock_embed.return_value = _fake_embed_model()
         mock_chroma.return_value = _fake_chroma_client(_fake_chroma_collection())

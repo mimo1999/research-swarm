@@ -53,8 +53,11 @@ class AgentState(TypedDict):
     draft_report: FinalReport | None
     final_report: FinalReport | None
 
-    # Human-in-the-loop feedback string
+    # Human-in-the-loop feedback strings:
+    #   human_feedback      -- consumed by the researcher for re-research passes
+    #   writer_instructions -- consumed by the writer for report revisions (HITL)
     human_feedback: str | None
+    writer_instructions: NotRequired[str | None]
 
     # Routing & control
     iteration_count: int

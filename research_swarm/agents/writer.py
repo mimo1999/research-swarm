@@ -89,7 +89,14 @@ async def run_writer(
     critiques: list = state.get("critiques") or []
     query = state.get("query")
     plan = state.get("plan")
-    human_feedback = state.get("human_feedback") or "None provided."
+    # writer_instructions is the dedicated HITL channel for report revisions.
+    # Fall back to human_feedback for backwards compatibility with checkpoints
+    # that pre-date the writer_instructions field.
+    human_feedback = (
+        state.get("writer_instructions")
+        or state.get("human_feedback")
+        or "None provided."
+    )
 
     refuted_ids = {
         fid

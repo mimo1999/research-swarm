@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.language_models import BaseChatModel
@@ -10,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from research_swarm.agents._utils import json_output_instruction
 from research_swarm.schemas import Finding, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -18,7 +20,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 MAX_TOOL_TURNS = 6  # max tool-call rounds per sub-question
+
+
+def _norm(s: str) -> str:
+    """Normalise a sub-question string for comparison.
+
+    Strips surrounding whitespace and lowercases so that trivial formatting
+    differences between the plan's sub-questions and the strings stored on
+    Finding objects don't prevent ID reuse on re-research passes (which would
+    cause duplicate findings and an unbounded critic loop).
+    """
+    return s.strip().lower()
+
 
 _SYSTEM_PROMPT = """\
 You are an expert Research Agent. Your goal is to answer a research sub-question
@@ -40,14 +55,23 @@ Session ID (required for retrieve_from_rag): {session_id}
 Audience: {audience}
 """
 
-_SYNTHESIS_PROMPT = """\
-Based on the evidence gathered above, write a concise, factual claim that directly
-answers the sub-question: "{sub_question}"
+_SYNTHESIS_JSON_SUFFIX = json_output_instruction({
+    "claim": "<one or two sentences summarising the answer>",
+    "confidence": 0.0,
+})
 
-Return ONLY a JSON object with these fields:
-  claim       -- one or two sentences summarising the answer
-  confidence  -- float 0.0-1.0 reflecting how well the evidence supports the claim
-"""
+
+def _synthesis_prompt(sub_question: str) -> str:
+    """Build the synthesis prompt for a specific sub-question.
+
+    Kept as a function (not a module-level .format() template) so the JSON
+    example braces in _SYNTHESIS_JSON_SUFFIX don't clash with str.format().
+    """
+    return (
+        f"Based on the evidence gathered above, write a concise, factual claim that "
+        f"directly answers the sub-question: \"{sub_question}\""
+        + _SYNTHESIS_JSON_SUFFIX
+    )
 
 
 class FindingSynthesis(BaseModel):
@@ -143,20 +167,22 @@ async def run_researcher(
     existing_findings = state.get("findings") or []
     critiques = state.get("critiques") or []
 
-    # Build a set of sub-questions that are already well-supported
+    # Build a set of sub-questions that are already well-supported.
+    # Normalise strings so whitespace/casing differences don't cause a
+    # supported sub-question to be researched again.
     ok_sub_questions: set[str] = set()
     for c in critiques:
         verdict = c.verdict if hasattr(c, "verdict") else c.get("verdict")
         fid = c.finding_id if hasattr(c, "finding_id") else c.get("finding_id")
-        if verdict == CritiqueVerdict.supported:
+        if str(verdict) == CritiqueVerdict.supported or verdict == CritiqueVerdict.supported:
             # Find the sub_question for this finding
             for f in existing_findings:
                 fid_key = f.id if hasattr(f, "id") else f.get("id")
                 sub_q = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
                 if fid_key == fid:
-                    ok_sub_questions.add(sub_q)
+                    ok_sub_questions.add(_norm(sub_q))
 
-    targets = [q for q in plan.sub_questions if q not in ok_sub_questions]
+    targets = [q for q in plan.sub_questions if _norm(q) not in ok_sub_questions]
 
     if not targets:
         logger.info("All sub-questions already well-supported -- nothing to research.")
@@ -186,7 +212,7 @@ async def run_researcher(
         sources = _extract_sources_from_messages(messages)
 
         # Synthesise a finding from the gathered evidence
-        synthesis_prompt = _SYNTHESIS_PROMPT.format(sub_question=sub_q)
+        synthesis_prompt = _synthesis_prompt(sub_q)
         synthesis_messages = messages + [HumanMessage(content=synthesis_prompt)]
 
         try:
@@ -198,25 +224,31 @@ async def run_researcher(
                 confidence=0.2,
             )
 
-        # Check if this sub-question already has a finding (re-research -> overwrite by id)
+        # Check if this sub-question already has a finding (re-research -> overwrite by id).
+        # Normalise the stored sub_question string before comparing so that trivial
+        # whitespace/casing differences don't cause a fresh UUID to be generated,
+        # which would bypass the merge-by-id reducer and duplicate the finding.
         existing_id: str | None = None
         for f in existing_findings:
             sub_key = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
-            if sub_key == sub_q:
+            if _norm(sub_key) == _norm(sub_q):
                 existing_id = f.id if hasattr(f, "id") else f.get("id")
                 break
 
+        if existing_id is None and bool(existing_findings):
+            logger.warning(
+                "Re-research: no existing finding matched sub-question %r -- "
+                "a new finding will be created (check for sub-question drift).",
+                sub_q,
+            )
+
         finding = Finding(
-            id=existing_id or Finding(claim="").id,  # reuse id to trigger merge
+            id=existing_id or str(uuid.uuid4()),
             claim=synthesis.claim,
             evidence=sources,
             confidence=synthesis.confidence,
             sub_question=sub_q,
         )
-        # Ensure id is set correctly when reusing
-        if existing_id:
-            object.__setattr__(finding, "id", existing_id) if hasattr(finding, "__dict__") else None
-            finding = finding.model_copy(update={"id": existing_id})
 
         new_findings.append(finding)
 

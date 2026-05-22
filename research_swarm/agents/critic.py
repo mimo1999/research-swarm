@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from research_swarm.agents._utils import _field, _latest_verdicts
+from research_swarm.agents._utils import _field, _latest_verdicts, json_output_instruction
 from research_swarm.schemas import Critique, CritiqueVerdict, Finding
 
 if TYPE_CHECKING:
@@ -15,17 +15,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """\
-You are a rigorous Research Critic. Your job is to evaluate each research finding
-and assign one of three verdicts:
-
-  supported -- the claim is well-supported by the cited evidence
-  weak      -- the claim needs more or stronger evidence
-  refuted   -- the evidence contradicts or does not support the claim
-
-Be concise. If the verdict is weak or refuted, suggest a specific follow-up
-research question in `suggested_followup`.
-"""
+_SYSTEM_PROMPT = (
+    "You are a rigorous Research Critic. Your job is to evaluate each research finding"
+    " and assign one of three verdicts:\n\n"
+    "  supported -- the claim is well-supported by the cited evidence\n"
+    "  weak      -- the claim needs more or stronger evidence\n"
+    "  refuted   -- the evidence contradicts or does not support the claim\n\n"
+    "Be concise. If the verdict is weak or refuted, suggest a specific follow-up"
+    " research question in `suggested_followup`."
+    + json_output_instruction({
+        "finding_id": "<uuid of the finding being reviewed>",
+        "verdict": "supported | weak | refuted",
+        "reasoning": "<one or two sentences explaining your verdict>",
+        "suggested_followup": "<specific follow-up question, or empty string if supported>",
+    })
+)
 
 _FINDING_TEMPLATE = """\
 Finding to review:
@@ -90,10 +94,13 @@ async def run_critic(
             critique = critique.model_copy(update={"finding_id": fid})
         except Exception as exc:
             logger.warning("Critic failed for finding %s: %s", fid, exc)
+            # Fallback to 'supported' rather than 'weak': an LLM outage should
+            # not trigger expensive re-research loops.  The fact-checker will
+            # still validate confidence scores independently.
             critique = Critique(
                 finding_id=fid,
-                verdict=CritiqueVerdict.weak,
-                reasoning=f"Critique generation failed: {exc}",
+                verdict=CritiqueVerdict.supported,
+                reasoning=f"Critique generation failed ({type(exc).__name__}); defaulting to supported.",  # noqa: E501
                 suggested_followup="",
             )
 

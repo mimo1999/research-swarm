@@ -63,9 +63,25 @@ def _get_checkpointer():
     return _run(make_async_checkpointer())
 
 
+def _agent_code_hash() -> str:
+    """Hash the mtime of every agent/tool module so the cache busts on code changes."""
+    import hashlib
+    from pathlib import Path
+    root = Path(__file__).parent / "research_swarm"
+    h = hashlib.md5()
+    for p in sorted(root.rglob("*.py")):
+        h.update(str(p.stat().st_mtime_ns).encode())
+    return h.hexdigest()[:8]
+
+
 @st.cache_resource(show_spinner="Loading graph…")
-def _get_graph(hitl: bool):
-    """Build (and cache) the compiled LangGraph.  One instance per HITL setting."""
+def _get_graph(hitl: bool, _code_hash: str = ""):  # noqa: ARG001
+    """Build (and cache) the compiled LangGraph.  One instance per HITL setting.
+
+    _code_hash is derived from agent module mtimes — it busts the cache
+    automatically whenever agent or tool code changes, so a server restart
+    is no longer needed after edits.
+    """
     return build_graph(checkpointer=_get_checkpointer(), interrupt_before_writer=hitl)
 
 
@@ -132,12 +148,17 @@ def _apply_ui_settings(ui: dict) -> None:
     """Apply settings that cannot yet be threaded through AgentState.
 
     model_provider, model_name, and max_sources are already in AgentState so
-    they are NOT mutated here.  Only the Ollama base URL (infrastructure config,
-    not a per-run parameter) is written to settings so that RAG query engines and
-    the LLM factory both see the user's custom URL consistently.
+    they are NOT mutated here.  Only Ollama infrastructure config (URL,
+    deployment mode) is written to settings so that the LLM factory and RAG
+    query engines always see the user's current selection consistently.
     """
-    if ui["provider"] == "ollama" and ui.get("ollama_url"):
-        settings.ollama_base_url = ui["ollama_url"]
+    if ui["provider"] == "ollama":
+        settings.ollama_deployment = ui.get("ollama_deployment") or "local"
+        # In both local and cloud mode the daemon URL is the same (localhost).
+        # Cloud mode uses the local daemon which proxies to Ollama's cloud via
+        # `ollama login` credentials — no separate URL needed.
+        if ui.get("ollama_url"):
+            settings.ollama_base_url = ui["ollama_url"]
 
 
 def _stream_graph(
@@ -247,8 +268,8 @@ def _render_hitl_panel(graph, config: dict, trace_container) -> None:
 
 
 def _resume_after_hitl(graph, config: dict, trace_container, feedback: str) -> None:
-    """Update state with human feedback and resume the graph to the writer."""
-    _run(graph.aupdate_state(config, {"human_feedback": feedback}))
+    """Update state with writer instructions and resume the graph to the writer."""
+    _run(graph.aupdate_state(config, {"writer_instructions": feedback}))
     st.session_state.interrupted = False
     # show_header=False: the trace header was already rendered when replaying
     interrupted = _stream_graph(graph, None, config, trace_container, show_header=False)
@@ -258,10 +279,16 @@ def _resume_after_hitl(graph, config: dict, trace_container, feedback: str) -> N
 
 
 def _request_more_research(graph, config: dict, instructions: str) -> None:
-    """Inject feedback that asks for more research, then re-run from supervisor."""
+    """Inject feedback that asks for more research, then re-run from supervisor.
+
+    Sets human_feedback (consumed by researcher) and clears next_agent so the
+    supervisor's human_feedback guard fires cleanly on the next supervisor call.
+    Does NOT force next_agent="researcher" — the supervisor's deterministic
+    routing handles that based on human_feedback being present (fix 2-A / 2-C).
+    """
     _run(graph.aupdate_state(config, {
-        "human_feedback":  instructions,
-        "next_agent":      "researcher",
+        "human_feedback": instructions,
+        "next_agent":     None,
     }))
     st.session_state.interrupted = False
     st.session_state.running     = True
@@ -273,7 +300,7 @@ def _request_more_research(graph, config: dict, instructions: str) -> None:
 def render_research_tab(ui: dict) -> None:
     st.markdown("## 🔬 Research")
 
-    graph  = _get_graph(ui["hitl_enabled"])
+    graph  = _get_graph(ui["hitl_enabled"], _code_hash=_agent_code_hash())
     config = get_thread_config(st.session_state.session_id or "init")
 
     # ── Interrupted state: show HITL panel ──
@@ -345,19 +372,20 @@ def _render_query_form(ui: dict, graph) -> None:
         audience=audience,
     )
     initial_state = {
-        "messages":       [],
-        "query":          query,
-        "plan":           None,
-        "findings":       [],
-        "critiques":      [],
-        "draft_report":   None,
-        "final_report":   None,
-        "human_feedback": None,
-        "iteration_count": 0,
-        "next_agent":     None,
-        "session_id":     session_id,
-        "model_provider": ui["provider"],
-        "model_name":     ui["model"],
+        "messages":            [],
+        "query":               query,
+        "plan":                None,
+        "findings":            [],
+        "critiques":           [],
+        "draft_report":        None,
+        "final_report":        None,
+        "human_feedback":      None,
+        "writer_instructions": None,
+        "iteration_count":     0,
+        "next_agent":          None,
+        "session_id":          session_id,
+        "model_provider":      ui["provider"],
+        "model_name":          ui["model"],
     }
 
     # Ingest user-supplied documents
@@ -392,11 +420,8 @@ def _render_query_form(ui: dict, graph) -> None:
 def main() -> None:
     _init_state()
 
-    st.markdown(
-        "<h1 style='margin-bottom:0'>🔬 Multi-Agent Research Swarm</h1>"
-        "<p style='color:#888;margin-top:4px'>Powered by LangGraph · LlamaIndex · Streamlit</p>",
-        unsafe_allow_html=True,
-    )
+    st.title("🔬 Multi-Agent Research Swarm")
+    st.caption("Powered by LangGraph · LlamaIndex · Streamlit")
     st.divider()
 
     # Sidebar

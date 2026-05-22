@@ -420,8 +420,12 @@ class TestRunCriticDirect:
             "critic must overwrite the hallucinated finding_id with the real one"
 
     @pytest.mark.asyncio
-    async def test_llm_failure_falls_back_to_weak_verdict(self):
-        """If the structured output call raises, critic returns a weak verdict, not an exception."""
+    async def test_llm_failure_falls_back_to_supported_verdict(self):
+        """If the structured output call raises, critic falls back to 'supported'.
+
+        Using 'supported' (rather than 'weak') as the safe default prevents an
+        LLM outage from triggering expensive re-research loops.
+        """
         from research_swarm.agents.critic import run_critic
 
         mock_llm = MagicMock()
@@ -431,7 +435,7 @@ class TestRunCriticDirect:
         state = _make_state(findings=[_make_finding()])
         (result,) = await run_critic(state, mock_llm)
 
-        assert result.verdict == CritiqueVerdict.weak
+        assert result.verdict == CritiqueVerdict.supported
         assert result.reasoning != ""
 
 

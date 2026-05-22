@@ -9,7 +9,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from research_swarm.agents._utils import _latest_verdicts
+from research_swarm.agents._utils import _latest_verdicts, json_output_instruction
 from research_swarm.config import settings
 from research_swarm.schemas import ResearchPlan
 from research_swarm.schemas.state import AgentName
@@ -20,31 +20,37 @@ if TYPE_CHECKING:
     from research_swarm.schemas.state import AgentState
 
 
-_SYSTEM_PROMPT = """\
-You are the Supervisor of a multi-agent research system.
-Analyse the current research state and decide which agent should act next.
-
-Available agents:
-  researcher   -- searches the web, arXiv, and the RAG index; produces Finding objects
-  critic       -- reviews each Finding and assigns supported / weak / refuted
-  fact_checker -- cross-checks claims against source snippets; updates confidence scores
-  writer       -- drafts the final report (will pause for human review before running)
-  end          -- terminate the session
-
-Decision guidelines:
-1. No plan yet            -> create a ResearchPlan, set next_agent = "researcher"
-2. Findings present, no critiques yet
-                          -> next_agent = "critic"
-3. Critiques present with weak/refuted verdicts AND iteration < max_iterations
-                          -> next_agent = "researcher"  (re-research weak points)
-4. All findings supported OR iteration >= max_iterations
-                          -> next_agent = "fact_checker"
-5. fact_checker has run (findings have updated confidence)
-                          -> next_agent = "writer"
-6. Report is complete     -> next_agent = "end"
-
-Always set `plan` when creating it for the first time; otherwise leave it null.
-"""
+_SYSTEM_PROMPT = (
+    "You are the Supervisor of a multi-agent research system.\n"
+    "Analyse the current research state and decide which agent should act next.\n\n"
+    "Available agents:\n"
+    "  researcher   -- searches the web, arXiv, and the RAG index; produces Finding objects\n"
+    "  critic       -- reviews each Finding and assigns supported / weak / refuted\n"
+    "  fact_checker -- cross-checks claims against source snippets; updates confidence scores\n"
+    "  writer       -- drafts the final report (will pause for human review before running)\n"
+    "  end          -- terminate the session\n\n"
+    "Decision guidelines:\n"
+    "1. No plan yet            -> create a ResearchPlan, set next_agent = \"researcher\"\n"
+    "2. Findings present, no critiques yet\n"
+    "                          -> next_agent = \"critic\"\n"
+    "3. Critiques present with weak/refuted verdicts AND iteration < max_iterations\n"
+    "                          -> next_agent = \"researcher\"  (re-research weak points)\n"
+    "4. All findings supported OR iteration >= max_iterations\n"
+    "                          -> next_agent = \"fact_checker\"\n"
+    "5. fact_checker has run (findings have updated confidence)\n"
+    "                          -> next_agent = \"writer\"\n"
+    "6. Report is complete     -> next_agent = \"end\"\n\n"
+    "Always set `plan` when creating it for the first time; otherwise leave it null."
+    + json_output_instruction({
+        "reasoning": "<brief explanation of your decision>",
+        "next_agent": "researcher | critic | fact_checker | writer | end",
+        "plan": {
+            "sub_questions": ["<question 1>", "<question 2>"],
+            "strategy": "<research strategy>",
+            "required_tools": ["web_search", "arxiv_search"],
+        },
+    })
+)
 
 
 class SupervisorDecision(BaseModel):
@@ -135,13 +141,39 @@ def _route_from_state(state: AgentState) -> SupervisorDecision | None:
     critiques = state.get("critiques") or []
     iteration = state.get("iteration_count", 0)
 
-    if state.get("final_report") is not None:
+    # Hard ceiling: if the session has consumed more than 4× max_iterations
+    # supervisor calls (counting critic/fact_checker rounds too), force it to
+    # end rather than loop indefinitely.  This guards against edge cases not
+    # covered by the researcher-specific iteration limit.
+    if iteration >= settings.max_iterations * 4:
+        logger.warning(
+            "Hard step ceiling reached (%d steps, limit=%d). Forcing fact_checker.",
+            iteration,
+            settings.max_iterations * 4,
+        )
+        return SupervisorDecision(
+            reasoning=(
+                f"Hard step ceiling reached ({iteration} steps). "
+                "Forcing fact-checking to terminate the session."
+            ),
+            next_agent="fact_checker",
+        )
+
+    # A completed report ends the session — UNLESS there are pending writer
+    # instructions (HITL revision requested), in which case we let the normal
+    # routing continue so the writer can be re-invoked with the new feedback.
+    if state.get("final_report") is not None and not state.get("writer_instructions"):
         return SupervisorDecision(
             reasoning="Final report exists; ending session.",
             next_agent="end",
         )
 
-    if state.get("next_agent") == "researcher" and state.get("human_feedback"):
+    # Human provided feedback: route to researcher for another pass, but only
+    # when the researcher has NOT just finished (next_agent would still be
+    # "researcher" in that case, causing an immediate re-entry loop).
+    # The researcher_node also clears human_feedback after consuming it, so
+    # this guard is a belt-and-suspenders check.
+    if state.get("human_feedback") and state.get("next_agent") != "researcher":
         return SupervisorDecision(
             reasoning="Human feedback requested another research pass.",
             next_agent="researcher",
@@ -185,7 +217,10 @@ def _route_from_state(state: AgentState) -> SupervisorDecision | None:
         for fid, verdict in latest_verdicts.items()
         if verdict in {"weak", "refuted"}
     }
-    if weak_or_refuted and iteration < settings.max_iterations:
+    # Use <= max_iterations (not <) to avoid an off-by-one: iteration_count is
+    # read *before* the supervisor_node increments it, so the effective limit
+    # would otherwise be max_iterations + 1 researcher cycles.
+    if weak_or_refuted and iteration <= settings.max_iterations:
         return SupervisorDecision(
             reasoning=f"{len(weak_or_refuted)} finding(s) need stronger evidence.",
             next_agent="researcher",

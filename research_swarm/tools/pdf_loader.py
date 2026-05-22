@@ -1,10 +1,11 @@
 """PDF loader tool -- extracts text from a local PDF file with page metadata."""
 import textwrap
-from pathlib import Path
 
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
+
+from research_swarm.utils.security import validate_file_path
 
 
 class PDFChunk(BaseModel):
@@ -38,7 +39,19 @@ def load_pdf(file_path: str, max_pages: int = 50, snippet_chars: int = 500) -> d
     Returns a dict matching the PDFLoadResult schema: includes per-page chunks
     and a combined Source-compatible snippet from the first few pages.
     """
-    path = Path(file_path)
+    # Security: reject paths that escape allowed directories (path traversal).
+    try:
+        path = validate_file_path(file_path)
+    except ValueError as exc:
+        return PDFLoadResult(
+            url=str(file_path),
+            title="",
+            total_pages=0,
+            chunks=[],
+            snippet=f"[Access denied: {exc}]",
+            credibility_score=0.0,
+        ).model_dump(mode="json")
+
     if not path.exists():
         return PDFLoadResult(
             url=str(path),

@@ -11,16 +11,15 @@ from __future__ import annotations
 
 import functools
 import logging
-from pathlib import Path
 
 import chromadb
-from llama_index.core import Settings as LISettings
 from llama_index.core import SummaryIndex, VectorStoreIndex
 from llama_index.core.base.llms.base import BaseLLM
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
 
 from research_swarm.config import settings
+from research_swarm.rag._chroma import collection_name, session_chroma_path
 
 logger = logging.getLogger(__name__)
 
@@ -46,28 +45,17 @@ def get_embed_model() -> HuggingFaceEmbedding:
 
 
 # ---------------------------------------------------------------------------
-# Chroma helpers (shared with ingestion.py)
+# Chroma helpers
 # ---------------------------------------------------------------------------
 
-def _session_chroma_path(session_id: str) -> Path:
-    path = settings.sessions_dir / session_id / "chroma"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _collection_name(session_id: str) -> str:
-    safe = "".join(c if c.isalnum() or c == "-" else "-" for c in session_id)
-    return f"rs-{safe}"[:63]
-
-
 def _get_chroma_store(session_id: str) -> ChromaVectorStore:
-    path = _session_chroma_path(session_id)
+    path = session_chroma_path(session_id)
     client = chromadb.PersistentClient(path=str(path))
-    collection = client.get_or_create_collection(
-        name=_collection_name(session_id),
+    coll = client.get_or_create_collection(
+        name=collection_name(session_id),
         metadata={"hnsw:space": "cosine"},
     )
-    return ChromaVectorStore(chroma_collection=collection)
+    return ChromaVectorStore(chroma_collection=coll)
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +96,15 @@ def build_summary_index(
             is empty -- useful as a placeholder when no LLM is available.
     """
     docs = documents or []
-    # Temporarily configure LlamaIndex global settings for this index build
-    LISettings.llm = llm
-    LISettings.embed_model = get_embed_model()
-
-    index = SummaryIndex.from_documents(docs, show_progress=False)
+    # Pass llm and embed_model explicitly instead of mutating the global
+    # LISettings singleton, which would be a race condition under concurrent
+    # Streamlit sessions sharing the same Python process.
+    index = SummaryIndex.from_documents(
+        docs,
+        show_progress=False,
+        llm=llm,
+        embed_model=get_embed_model(),
+    )
     logger.info(
         "SummaryIndex built with %d documents for session '%s'.", len(docs), session_id
     )

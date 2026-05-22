@@ -6,8 +6,23 @@ from tavily import TavilyClient
 
 from research_swarm.config import settings
 from research_swarm.schemas.source import Source, SourceType
+from research_swarm.utils.security import sanitize_fetched_content
 
 logger = structlog.get_logger(__name__)
+
+# Module-level client singleton: avoids re-constructing on every tool call.
+# Re-created lazily when the API key changes (SecretStr comparison by value).
+_tavily_client: TavilyClient | None = None
+_tavily_key_cache: str = ""
+
+
+def _get_tavily_client() -> TavilyClient:
+    global _tavily_client, _tavily_key_cache  # noqa: PLW0603
+    current_key = settings.tavily_api_key.get_secret_value()
+    if _tavily_client is None or current_key != _tavily_key_cache:
+        _tavily_client = TavilyClient(api_key=current_key)
+        _tavily_key_cache = current_key
+    return _tavily_client
 
 
 class WebSearchInput(BaseModel):
@@ -38,7 +53,7 @@ def web_search(query: str, max_results: int = 5, search_depth: str = "basic") ->
     can place them in the message stream without serialisation issues.
     """
     try:
-        client = TavilyClient(api_key=settings.tavily_api_key)
+        client = _get_tavily_client()
         response = client.search(
             query=query,
             max_results=max_results,
@@ -64,10 +79,11 @@ def web_search(query: str, max_results: int = 5, search_depth: str = "basic") ->
         ]
     sources: list[dict] = []
     for r in response.get("results", []):
+        raw_snippet = r.get("content", "")[:1000]
         source = Source(
             url=r.get("url", ""),
             title=r.get("title", ""),
-            snippet=r.get("content", "")[:1000],
+            snippet=sanitize_fetched_content(raw_snippet),
             source_type=SourceType.web,
             credibility_score=_credibility_score(r.get("url", "")),
         )

@@ -1,6 +1,8 @@
 """SQLite session management -- list, load, and delete past research sessions."""
 from __future__ import annotations
 
+import asyncio
+import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -86,9 +88,12 @@ def get_session_state(thread_id: str) -> dict[str, Any] | None:
 
     Opens a fresh AsyncSqliteSaver connection so the caller does not need to
     manage a long-lived checkpointer reference.
-    """
-    import asyncio
 
+    Uses ``asyncio.get_event_loop().run_until_complete()`` when a loop is
+    already running (e.g. inside Streamlit with nest_asyncio applied) to
+    avoid the "cannot run a new event loop" error that ``asyncio.run()``
+    raises in that context.
+    """
     from research_swarm.graph.builder import build_graph, get_thread_config, make_async_checkpointer
 
     async def _load() -> dict[str, Any] | None:
@@ -103,22 +108,64 @@ def get_session_state(thread_id: str) -> dict[str, Any] | None:
             return None
         return dict(snapshot.values) if hasattr(snapshot, "values") else None
 
-    return asyncio.run(_load())
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # nest_asyncio is active (Streamlit context) — submit to running loop
+            future = asyncio.run_coroutine_threadsafe(_load(), loop)
+            return future.result(timeout=30)
+        return loop.run_until_complete(_load())
+    except RuntimeError:
+        # No current event loop — create one
+        return asyncio.run(_load())
 
 
 def delete_session(thread_id: str) -> int:
-    """Delete all checkpoints for a session. Returns number of rows deleted."""
+    """Delete all checkpoints and session data for *thread_id*.
+
+    Removes:
+    - All rows in the ``checkpoints`` and ``writes`` tables for this thread.
+    - The session's ChromaDB directory (``data/sessions/<thread_id>/chroma``).
+
+    Returns the number of checkpoint rows deleted.
+    """
     db = _db_path()
-    if not db.exists():
-        return 0
-    conn = sqlite3.connect(str(db))
-    try:
-        cur = conn.execute(
-            "DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,)
-        )
-        conn.commit()
-        return cur.rowcount
-    except sqlite3.OperationalError:
-        return 0
-    finally:
-        conn.close()
+    rows_deleted = 0
+
+    if db.exists():
+        conn = sqlite3.connect(str(db))
+        try:
+            # Delete checkpoints first, in its own commit so the deletion is
+            # persisted even when the writes table doesn't exist yet (older DBs).
+            try:
+                cur = conn.execute(
+                    "DELETE FROM checkpoints WHERE thread_id = ?", (thread_id,)
+                )
+                rows_deleted = cur.rowcount
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+
+            # Also clean the writes table (LangGraph stores pending writes there).
+            # This table was added later and may not exist in older databases, so
+            # handle OperationalError independently from the checkpoints deletion.
+            try:
+                conn.execute("DELETE FROM writes WHERE thread_id = ?", (thread_id,))
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
+        finally:
+            conn.close()
+
+    # Remove the Chroma vector store for this session
+    chroma_dir = settings.sessions_dir / thread_id
+    if chroma_dir.exists():
+        try:
+            shutil.rmtree(chroma_dir)
+        except OSError as exc:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Could not remove session directory %s: %s", chroma_dir, exc
+            )
+
+    return rows_deleted

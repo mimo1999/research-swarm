@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,15 +11,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # LLM providers
-    anthropic_api_key: str = ""
-    openai_api_key: str = ""
+    # LLM providers — stored as SecretStr so values are masked in logs/repr
+    anthropic_api_key: SecretStr = SecretStr("")
+    openai_api_key: SecretStr = SecretStr("")
 
     # Tools
-    tavily_api_key: str = ""
+    tavily_api_key: SecretStr = SecretStr("")
 
     # Observability
-    langsmith_api_key: str = ""
+    langsmith_api_key: SecretStr = SecretStr("")
     langchain_tracing_v2: bool = False
     langchain_project: str = "research-swarm"
 
@@ -36,10 +37,13 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 50
 
-    # Local RAG -- LLM for routing / decomposition (Ollama, optional)
+    # Ollama — shared for both local and cloud deployments.
+    # In cloud mode the local daemon (same URL) proxies requests to Ollama's
+    # cloud infrastructure using the credentials from `ollama login`.
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma4:e2b"
     ollama_timeout: float = 120.0      # seconds
+    ollama_deployment: str = "local"   # "local" | "cloud"
 
     @property
     def sessions_dir(self) -> Path:

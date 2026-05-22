@@ -25,17 +25,19 @@ def get_agent_llm(
     model = model or settings.default_model_name
 
     if provider == "anthropic":
+        _key = settings.anthropic_api_key.get_secret_value()
         return ChatAnthropic(
             model=model,
             temperature=temperature,
-            api_key=settings.anthropic_api_key or None,
+            api_key=_key or None,
         )
 
     if provider == "openai":
+        _key = settings.openai_api_key.get_secret_value()
         return ChatOpenAI(
             model=model,
             temperature=temperature,
-            api_key=settings.openai_api_key or None,
+            api_key=_key or None,
         )
 
     if provider == "ollama":
