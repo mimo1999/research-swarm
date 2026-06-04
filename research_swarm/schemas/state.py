@@ -32,7 +32,8 @@ def _merge_findings(existing: list, new: list) -> list:
 
 
 AgentName = Literal[
-    "supervisor", "researcher", "critic", "writer", "fact_checker", "human", "end"
+    "supervisor", "researcher", "critic", "writer", "fact_checker",
+    "dispatch", "collect", "human", "end",
 ]
 
 
@@ -54,7 +55,7 @@ class AgentState(TypedDict):
     final_report: FinalReport | None
 
     # Human-in-the-loop feedback strings:
-    #   human_feedback      -- consumed by the researcher for re-research passes
+    #   human_feedback      -- consumed by the dispatcher for re-research passes
     #   writer_instructions -- consumed by the writer for report revisions (HITL)
     human_feedback: str | None
     writer_instructions: NotRequired[str | None]
@@ -69,3 +70,20 @@ class AgentState(TypedDict):
     # Per-run model settings; omitted in tests and older checkpoints.
     model_provider: NotRequired[str]
     model_name: NotRequired[str]
+
+    # Incremented when AgentState fields change in a breaking way.
+    # Older checkpoints that lack this field are treated as version 0.
+    schema_version: NotRequired[int]
+
+    # --- Phase 4: parallel dispatch fields ---
+
+    # Per-worker state injected via Send; cleared after each dispatch round.
+    active_sub_question: NotRequired[str | None]
+    active_worker_role:  NotRequired[str | None]
+
+    # How many dispatch→workers→collect cycles have completed.
+    research_rounds: NotRequired[int]
+
+    # Finding IDs present just before the most recent dispatch round.
+    # collect_node uses this to identify which findings are newly produced.
+    pre_dispatch_finding_ids: NotRequired[list[str]]
