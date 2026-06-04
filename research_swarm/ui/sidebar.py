@@ -9,15 +9,17 @@ from research_swarm.schemas import ResearchDepth
 _ANTHROPIC_MODELS    = ["claude-sonnet-4-6", "claude-opus-4-5", "claude-haiku-3-5"]
 _OPENAI_MODELS       = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"]
 _OLLAMA_CLOUD_MODELS = [
-    "nemotron-3-super:cloud",
     "minimax-m2.5:cloud",
+    "gpt-oss:120b-cloud",
     "qwen3-coder-next:cloud",
+    "qwen3.5:cloud",
+    "minimax-m2.7:cloud",
 ]
 
 _DEPTH_LABELS = {
-    ResearchDepth.shallow:  "⚡ Shallow  (fast, 2-3 sources)",
-    ResearchDepth.standard: "⚖️  Standard (balanced)",
-    ResearchDepth.deep:     "🔬 Deep     (thorough, more LLM calls)",
+    ResearchDepth.shallow:  "⚡ Shallow  (fastest — 1 sub-question, 1 tool turn, no re-research)",
+    ResearchDepth.standard: "⚖️  Standard (balanced — 4 sub-questions, 3 tool turns)",
+    ResearchDepth.deep:     "🔬 Deep     (thorough — 6 sub-questions, 6 tool turns)",
 }
 
 _PROVIDER_LABELS = {
@@ -25,6 +27,8 @@ _PROVIDER_LABELS = {
     "openai":    "🟢 OpenAI (GPT)",
     "ollama":    "🦙 Ollama",
 }
+
+_PROVIDERS = ["ollama", "anthropic", "openai"]
 
 
 def render_sidebar() -> dict:
@@ -40,7 +44,7 @@ def render_sidebar() -> dict:
         st.subheader("Model")
         provider = st.radio(
             "Provider",
-            ["anthropic", "openai", "ollama"],
+            _PROVIDERS,
             format_func=lambda x: _PROVIDER_LABELS[x],
             horizontal=True,
             key="ui_provider",
@@ -89,9 +93,13 @@ def render_sidebar() -> dict:
                 _render_ollama_local_status(ollama_url, model)
 
             else:  # cloud
+                _cloud_default = settings.ollama_cloud_model
+                _cloud_idx = _OLLAMA_CLOUD_MODELS.index(_cloud_default) \
+                    if _cloud_default in _OLLAMA_CLOUD_MODELS else 0
                 model = st.selectbox(
                     "Cloud model",
                     _OLLAMA_CLOUD_MODELS,
+                    index=_cloud_idx,
                     key="ui_model_ollama",
                     help="Streamed from ollama.com via your logged-in account.",
                 )
@@ -107,12 +115,12 @@ def render_sidebar() -> dict:
         depth_key = st.select_slider(
             "Depth",
             options=[ResearchDepth.shallow, ResearchDepth.standard, ResearchDepth.deep],
-            value=ResearchDepth.standard,
+            value=ResearchDepth.shallow,
             format_func=lambda d: _DEPTH_LABELS[d],
             key="ui_depth",
         )
         max_sources = st.slider(
-            "Max sources", min_value=3, max_value=30, value=10, step=1,
+            "Max sources", min_value=3, max_value=30, value=settings.max_sources, step=1,
             key="ui_max_sources",
         )
 
