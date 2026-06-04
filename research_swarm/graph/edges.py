@@ -1,39 +1,39 @@
-"""Conditional edge routing for the research swarm graph."""
+"""Conditional edge routing for the research swarm graph.
+
+Phase-4 topology — all routing after plan creation is deterministic.
+
+  route_from_supervisor  → always "dispatch_node" (plan just created)
+  route_from_dispatch    → list[Send], one per target sub-question (in nodes.py)
+  route_from_collect     → "dispatch_node" (loop) or "critic" (stop)
+"""
 from __future__ import annotations
 
 import logging
 
 from langgraph.graph import END
 
-from research_swarm.schemas.state import AgentName, AgentState
+from research_swarm.schemas.state import AgentState
 
 logger = logging.getLogger(__name__)
 
-_ROUTING: dict[str, str] = {
-    "researcher": "researcher",
-    "critic": "critic",
-    "fact_checker": "fact_checker",
-    "writer": "writer",
-    "human": "writer",   # HITL: interrupt_before writer handles the pause
-    "end": END,
-}
-
 
 def route_from_supervisor(state: AgentState) -> str:
-    """Map the supervisor's ``next_agent`` decision to a graph node name.
-
-    Returns a string matching one of the graph node names or ``END``.
-    Logs a WARNING when an unrecognised value is encountered so routing
-    failures surface in logs rather than silently terminating the session.
-    """
-    next_agent: AgentName | None = state.get("next_agent")
-    key = str(next_agent)
-
-    if key not in _ROUTING:
+    """After supervisor_node: always routes to dispatch_node."""
+    next_agent = state.get("next_agent", "dispatch")
+    if str(next_agent) in ("end", END):
+        return END
+    # Everything else (incl. "dispatch", unexpected values) → dispatch_node
+    if str(next_agent) not in ("dispatch",):
         logger.warning(
-            "route_from_supervisor: unrecognised next_agent=%r -- routing to END. "
-            "Check supervisor output for unexpected values.",
+            "route_from_supervisor: unexpected next_agent=%r — routing to dispatch_node.",
             next_agent,
         )
+    return "dispatch_node"
 
-    return _ROUTING.get(key, END)
+
+def route_from_collect(state: AgentState) -> str:
+    """After collect_node: route to dispatch_node (loop) or critic (stop)."""
+    next_agent = state.get("next_agent", "critic")
+    if str(next_agent) == "dispatch":
+        return "dispatch_node"
+    return "critic"
