@@ -100,6 +100,18 @@ def _init_state() -> None:
         if k not in st.session_state:
             st.session_state[k] = v
 
+    # Migrate stale provider selection: if the session still has the old
+    # hard-coded "anthropic" default but the configured default has changed,
+    # push the new default so existing sessions pick it up automatically.
+    if (
+        st.session_state.get("ui_provider") == "anthropic"
+        and settings.default_model_provider != "anthropic"
+    ):
+        st.session_state["ui_provider"] = settings.default_model_provider
+        # Also reset the deployment so the Ollama cloud path activates.
+        st.session_state["ui_ollama_deployment"] = settings.ollama_deployment
+        st.session_state["ui_model_ollama"] = settings.ollama_cloud_model
+
 
 def _reset_run() -> None:
     st.session_state.update(
@@ -386,6 +398,7 @@ def _render_query_form(ui: dict, graph) -> None:
         "session_id":          session_id,
         "model_provider":      ui["provider"],
         "model_name":          ui["model"],
+        "schema_version":      1,
     }
 
     # Ingest user-supplied documents
@@ -443,6 +456,7 @@ def main() -> None:
 
     with tab_sessions:
         def on_resume(thread_id: str) -> None:
+            from research_swarm.runtime.migrations import migrate_state
             # Load saved state into session
             st.session_state.session_id  = thread_id
             st.session_state.running     = False
@@ -454,7 +468,7 @@ def main() -> None:
             config = get_thread_config(thread_id)
             snap = _run(graph.aget_state(config))
             if snap and snap.values:
-                saved = snap.values
+                saved = migrate_state(dict(snap.values))  # upgrade v0 checkpoints
                 if saved.get("final_report"):
                     st.session_state.final_report = saved["final_report"]
             # Check if it's paused at HITL

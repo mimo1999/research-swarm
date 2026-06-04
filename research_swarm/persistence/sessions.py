@@ -48,7 +48,7 @@ def list_sessions() -> list[SessionSummary]:
                 thread_id,
                 MIN(created_at) AS first_seen,
                 MAX(created_at) AS last_seen,
-                COUNT(*) AS steps
+                COUNT(*)        AS steps
             FROM checkpoints
             GROUP BY thread_id
             ORDER BY last_seen DESC
@@ -61,23 +61,25 @@ def list_sessions() -> list[SessionSummary]:
     finally:
         conn.close()
 
+    def _parse_ts(raw: str | None) -> datetime | None:
+        if not raw:
+            return None
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
+            try:
+                return datetime.strptime(raw, fmt).replace(tzinfo=UTC)
+            except ValueError:
+                continue
+        return None
+
     summaries: list[SessionSummary] = []
     for row in rows:
-        def _parse_dt(val: str | None) -> datetime | None:
-            if not val:
-                return None
-            try:
-                return datetime.fromisoformat(str(val)).replace(tzinfo=UTC)
-            except ValueError:
-                return None
-
         summaries.append(
             SessionSummary(
                 thread_id=row["thread_id"],
-                created_at=_parse_dt(row["first_seen"]),
-                updated_at=_parse_dt(row["last_seen"]),
+                created_at=_parse_ts(row["first_seen"]),
+                updated_at=_parse_ts(row["last_seen"]),
                 step_count=row["steps"],
-                has_report=False,   # updated below if possible
+                has_report=False,
             )
         )
     return summaries
@@ -106,7 +108,12 @@ def get_session_state(thread_id: str) -> dict[str, Any] | None:
             await saver.conn.close()
         if snapshot is None:
             return None
-        return dict(snapshot.values) if hasattr(snapshot, "values") else None
+        raw = dict(snapshot.values) if hasattr(snapshot, "values") else None
+        # An empty dict means the thread was never written — treat as not found.
+        if not raw:
+            return None
+        from research_swarm.runtime.migrations import migrate_state
+        return migrate_state(raw)
 
     try:
         loop = asyncio.get_event_loop()
