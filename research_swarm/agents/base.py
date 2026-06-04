@@ -1,9 +1,26 @@
 """LLM factory -- returns a LangChain ChatModel for use in agents."""
+from __future__ import annotations
+
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 
 from research_swarm.config import settings
+
+
+def get_tiered_llm(
+    tier: str,
+    temperature: float = 0.0,
+) -> BaseChatModel:
+    """Return a ChatModel for the given cost tier ('fast', 'standard', 'thorough').
+
+    Tiers are configured in ``settings`` as ``tier_{tier}_provider`` and
+    ``tier_{tier}_model``.  Falls back to the default provider/model if the
+    requested tier is unknown.
+    """
+    provider = getattr(settings, f"tier_{tier}_provider", settings.default_model_provider)
+    model    = getattr(settings, f"tier_{tier}_model",    settings.default_model_name)
+    return get_agent_llm(provider=provider, model=model, temperature=temperature)
 
 
 def get_agent_llm(

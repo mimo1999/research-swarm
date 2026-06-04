@@ -24,11 +24,12 @@ class Settings(BaseSettings):
     langchain_project: str = "research-swarm"
 
     # App settings
-    default_model_provider: str = "anthropic"
-    default_model_name: str = "claude-sonnet-4-6"
-    default_depth: str = "standard"
-    max_iterations: int = 10
-    max_sources: int = 15
+    default_model_provider: str = "ollama"
+    default_model_name: str = "minimax-m2.5:cloud"
+    default_depth: str = "shallow"
+    max_iterations: int = 1
+    max_sources: int = 3
+    max_llm_calls: int = 25   # hard budget per session; raise BudgetExceeded above this
     data_dir: Path = Path("data")
 
     # Local RAG -- embeddings (HuggingFace, runs fully on CPU)
@@ -42,12 +43,49 @@ class Settings(BaseSettings):
     # cloud infrastructure using the credentials from `ollama login`.
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma4:e2b"
+    ollama_cloud_model: str = "minimax-m2.5:cloud"
     ollama_timeout: float = 120.0      # seconds
-    ollama_deployment: str = "local"   # "local" | "cloud"
+    ollama_deployment: str = "cloud"   # "local" | "cloud"
+
+    # ── Model tiers ──────────────────────────────────────────────────────────
+    # Each tier maps to a (provider, model) pair.  Nodes pick the cheapest tier
+    # that matches their quality requirements:
+    #   fast      -- cheap/quick: routing decisions, structured extraction
+    #   standard  -- balanced:    research workers, critique, fact-checking
+    #   thorough  -- expensive:   synthesis / writing
+    #
+    # Defaults reuse the Ollama stack so no extra API key is required.
+    tier_fast_provider:     str = "ollama"
+    tier_fast_model:        str = "gemma4:e2b"
+    tier_standard_provider: str = "ollama"
+    tier_standard_model:    str = "minimax-m2.5:cloud"
+    tier_thorough_provider: str = "ollama"
+    tier_thorough_model:    str = "minimax-m2.5:cloud"
+
+    # ── Research-loop limits by depth ────────────────────────────────────────
+    # Maximum dispatch→workers→collect cycles before forcing progression
+    # to the critic regardless of the stop-signal score.
+    max_research_rounds_shallow:  int = 1
+    max_research_rounds_standard: int = 2
+    max_research_rounds_deep:     int = 4
+
+    # ── Stop-signal thresholds ───────────────────────────────────────────────
+    # Fraction of new findings considered novel (below = stop).
+    stop_novelty_threshold:    float = 0.15
+    # Mean cosine similarity of new vs existing finding claims (above = stop).
+    stop_similarity_threshold: float = 0.85
 
     @property
     def sessions_dir(self) -> Path:
         return self.data_dir / "sessions"
+
+    def max_research_rounds(self, depth: str) -> int:
+        """Return the research-loop cap for the given depth string."""
+        return {
+            "shallow":  self.max_research_rounds_shallow,
+            "standard": self.max_research_rounds_standard,
+            "deep":     self.max_research_rounds_deep,
+        }.get(depth, self.max_research_rounds_standard)
 
 
 settings = Settings()

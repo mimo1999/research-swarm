@@ -21,7 +21,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-MAX_TOOL_TURNS = 6  # max tool-call rounds per sub-question
+# Tool-turn limits per depth level.  Each turn is one LLM call, so this is
+# the dominant factor in per-sub-question latency with slow cloud models.
+_TOOL_TURNS_BY_DEPTH: dict[str, int] = {
+    "shallow":  1,   # single search call, no follow-up fetches
+    "standard": 3,   # balanced
+    "deep":     6,   # thorough: original behaviour
+}
+MAX_TOOL_TURNS = _TOOL_TURNS_BY_DEPTH["standard"]  # module-level fallback
 
 
 def _norm(s: str) -> str:
@@ -40,20 +47,28 @@ You are an expert Research Agent. Your goal is to answer a research sub-question
 by calling the available tools to gather evidence, then synthesising your findings.
 
 Available tools:
-  web_search      -- search the web (Tavily)
-  arxiv_search    -- search arXiv preprints
-  fetch_url       -- fetch and extract text from a URL
+  web_search        -- search the web (Tavily)
+  arxiv_search      -- search arXiv preprints
+  fetch_url         -- fetch and extract text from a URL
   retrieve_from_rag -- query documents already ingested into the session RAG index
 
-Strategy:
-1. Start with retrieve_from_rag to check if the answer is already in the session corpus.
-2. Use web_search and arxiv_search for fresh information.
-3. Fetch promising URLs for detail.
-4. Stop calling tools once you have enough evidence (3-5 good sources).
+Strategy ({depth} mode):
+{strategy}
 
 Session ID (required for retrieve_from_rag): {session_id}
 Audience: {audience}
 """
+
+_STRATEGY_SHALLOW = """\
+1. Call web_search FIRST for a direct, fast answer.
+2. Do NOT call retrieve_from_rag or fetch_url (budget is 1 tool call).
+3. Synthesise immediately from the search results."""
+
+_STRATEGY_DEFAULT = """\
+1. Start with retrieve_from_rag to check if the answer is already in the session corpus.
+2. Use web_search and arxiv_search for fresh information.
+3. Fetch promising URLs for detail.
+4. Stop calling tools once you have enough evidence (3-5 good sources)."""
 
 _SYNTHESIS_JSON_SUFFIX = json_output_instruction({
     "claim": "<one or two sentences summarising the answer>",
@@ -85,6 +100,7 @@ async def _run_tool_loop(
     llm_with_tools: BaseChatModel,
     tool_map: dict[str, BaseTool],
     system_msg: SystemMessage,
+    max_turns: int = MAX_TOOL_TURNS,
 ) -> list[Any]:
     """Run tool-calling loop for a single sub-question. Returns full message history."""
     messages: list[Any] = [
@@ -92,7 +108,7 @@ async def _run_tool_loop(
         HumanMessage(content=f"Sub-question to research: {sub_question}"),
     ]
 
-    for _ in range(MAX_TOOL_TURNS):
+    for _ in range(max_turns):
         response = await llm_with_tools.ainvoke(messages)
         messages.append(response)
 
@@ -163,6 +179,11 @@ async def run_researcher(
     query = state.get("query")
     audience = query.audience if query else "general"
 
+    # Resolve depth → tool-turn budget (str or enum both work)
+    _d = query.depth if query else "standard"
+    raw_depth = str(_d.value if hasattr(_d, "value") else _d)
+    max_turns = _TOOL_TURNS_BY_DEPTH.get(raw_depth, MAX_TOOL_TURNS)
+
     # Determine which sub-questions need research
     existing_findings = state.get("findings") or []
     critiques = state.get("critiques") or []
@@ -193,8 +214,14 @@ async def run_researcher(
     llm_with_tools = llm.bind_tools(tools)
     synthesis_llm = llm.with_structured_output(FindingSynthesis)
 
+    strategy = _STRATEGY_SHALLOW if raw_depth == "shallow" else _STRATEGY_DEFAULT
     system_msg = SystemMessage(
-        content=_SYSTEM_PROMPT.format(session_id=session_id, audience=audience)
+        content=_SYSTEM_PROMPT.format(
+            depth=raw_depth,
+            strategy=strategy,
+            session_id=session_id,
+            audience=audience,
+        )
     )
 
     new_findings: list[Finding] = []
@@ -207,6 +234,7 @@ async def run_researcher(
             llm_with_tools=llm_with_tools,
             tool_map=tool_map,
             system_msg=system_msg,
+            max_turns=max_turns,
         )
 
         sources = _extract_sources_from_messages(messages)
