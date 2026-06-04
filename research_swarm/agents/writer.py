@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from research_swarm.agents._utils import _field, _latest_verdicts
+from research_swarm.agents._utils import _field, _latest_verdicts, json_output_instruction
 from research_swarm.schemas import FinalReport, ReportSection, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -32,19 +32,30 @@ Audience: {audience}
 Human feedback: {human_feedback}
 """
 
-_FINDINGS_TEMPLATE = """\
-Research findings ({n} total):
+_FINDINGS_TEMPLATE = (
+    "Research findings ({n} total):\n\n"
+    "{findings_text}\n\n"
+    "Sub-questions to cover:\n"
+    "{sub_questions}\n\n"
+    "All sources referenced:\n"
+    "{sources_text}\n\n"
+    "Write the final report now."
+)
 
-{findings_text}
-
-Sub-questions to cover:
-{sub_questions}
-
-All sources referenced:
-{sources_text}
-
-Write the final report now.
-"""
+# Appended after .format() so the JSON braces don't clash with str.format()
+_FINDINGS_JSON_SUFFIX = json_output_instruction({
+    "title": "<report title>",
+    "exec_summary": "<executive summary in Markdown>",
+    "sections": [
+        {
+            "heading": "<section heading>",
+            "body_md": "<section body in Markdown>",
+            "citations": [1],
+        }
+    ],
+    "methodology": "<research methodology>",
+    "limitations": "<known limitations>",
+})
 
 
 def _collect_references(findings: list) -> list[Source]:
@@ -107,7 +118,7 @@ async def run_writer(
     valid_findings = [
         f for f in findings
         if _field(f, "id", "") not in refuted_ids
-        and _field(f, "confidence", 0) >= 0.3
+        and _field(f, "confidence", 0) >= 0.1  # low bar — writer acknowledges uncertainty
     ]
 
     if not valid_findings:
@@ -140,7 +151,7 @@ async def run_writer(
             findings_text=findings_text,
             sub_questions=sub_questions or "  (none)",
             sources_text=sources_text or "  (none)",
-        )
+        ) + _FINDINGS_JSON_SUFFIX
     )
 
     structured_llm = llm.with_structured_output(FinalReport)
@@ -176,4 +187,61 @@ async def run_writer(
             limitations="Report generated in fallback mode due to LLM error.",
         )
 
+    # ------------------------------------------------------------------
+    # Faithfulness check — one rewrite attempt if score is too low.
+    # Uses embedding cosine similarity between section bodies and cited
+    # source snippets; no extra LLM call for the check itself.
+    # ------------------------------------------------------------------
+    report = await _faithfulness_rewrite(report, references, structured_llm, system_msg, user_msg)
+
     return report
+
+
+async def _faithfulness_rewrite(
+    report: FinalReport,
+    references: list[Source],
+    structured_llm,
+    system_msg: SystemMessage,
+    original_user_msg: HumanMessage,
+) -> FinalReport:
+    """Return *report* unchanged if faithfulness is acceptable; else rewrite once."""
+    try:
+        from research_swarm.eval.faithfulness import FAITHFULNESS_THRESHOLD, score_report
+    except ImportError:
+        return report  # eval not available — skip
+
+    try:
+        faith_score = score_report(report, references)
+    except Exception as exc:
+        logger.warning("Faithfulness scoring failed (%s) — skipping rewrite.", exc)
+        return report
+
+    logger.info("Faithfulness score: %.3f (threshold=%.2f)", faith_score, FAITHFULNESS_THRESHOLD)
+    if faith_score >= FAITHFULNESS_THRESHOLD:
+        return report
+
+    logger.warning(
+        "Faithfulness %.3f < %.2f — requesting one rewrite pass.",
+        faith_score, FAITHFULNESS_THRESHOLD,
+    )
+    rewrite_msg = HumanMessage(
+        content=(
+            f"The previous report scored {faith_score:.2f} on faithfulness "
+            f"(threshold {FAITHFULNESS_THRESHOLD}).  "
+            "Please rewrite it so that every claim is directly supported by the "
+            "cited source snippets.  Remove or qualify any claim that lacks "
+            "clear evidential support.  Return the full corrected report in the "
+            "same JSON format."
+        )
+    )
+    try:
+        rewritten: FinalReport = await structured_llm.ainvoke(
+            [system_msg, original_user_msg, rewrite_msg]
+        )
+        if not rewritten.references:
+            rewritten = rewritten.model_copy(update={"references": references})
+        logger.info("Rewrite faithfulness: %.3f", score_report(rewritten, references))
+        return rewritten
+    except Exception as exc:
+        logger.warning("Faithfulness rewrite failed (%s) — keeping original.", exc)
+        return report

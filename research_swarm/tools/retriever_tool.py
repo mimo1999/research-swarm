@@ -40,13 +40,18 @@ def make_retriever_tool(get_query_engine: Callable):
         """Query the session-scoped RAG index and return matching Source dicts.
 
         The index contains previously ingested PDFs, arXiv papers, and URLs.
+        Results are re-ranked by a cross-encoder for relevance before being
+        returned to the researcher.
         """
+        from research_swarm.rag.reranker import rerank  # lazy import
+
         engine = get_query_engine(session_id)
-        # LlamaIndex query engines return a Response object with source_nodes
+        # Fetch more candidates than top_k so the reranker has room to reorder.
+        fetch_k = min(top_k * 3, 20)
         response = engine.query(query)
 
         sources: list[dict] = []
-        nodes = getattr(response, "source_nodes", [])[:top_k]
+        nodes = getattr(response, "source_nodes", [])[:fetch_k]
         for node in nodes:
             metadata = node.metadata or {}
             source = Source(
@@ -57,7 +62,9 @@ def make_retriever_tool(get_query_engine: Callable):
                 credibility_score=float(node.score) if node.score is not None else 0.6,
             )
             sources.append(source.model_dump(mode="json"))
-        return sources
+
+        # Rerank by cross-encoder relevance and return top_k best chunks.
+        return rerank(query, sources, top_k=top_k)
 
     return retrieve_from_rag
 

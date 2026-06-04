@@ -521,7 +521,8 @@ class TestRunWriterDirect:
         """Writer with zero valid findings must return a minimal 'insufficient' report."""
         from research_swarm.agents.writer import run_writer
 
-        low_conf = _make_finding(confidence=0.1)
+        # Confidence must be below the writer's filter floor (currently 0.1)
+        low_conf = _make_finding(confidence=0.05)
         state = _make_state(findings=[low_conf])
         report = await run_writer(state, MagicMock())
 
