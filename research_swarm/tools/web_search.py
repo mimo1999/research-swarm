@@ -1,5 +1,6 @@
 """Tavily web search tool -- returns a list of Source objects."""
-import structlog
+import logging
+
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from tavily import TavilyClient
@@ -8,7 +9,7 @@ from research_swarm.config import settings
 from research_swarm.schemas.source import Source, SourceType
 from research_swarm.utils.security import sanitize_fetched_content
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Module-level client singleton: avoids re-constructing on every tool call.
 # Re-created lazily when the API key changes (SecretStr comparison by value).
@@ -63,10 +64,10 @@ def web_search(query: str, max_results: int = 5, search_depth: str = "basic") ->
         )
     except Exception as exc:
         logger.warning(
-            "web_search failed",
-            query=query,
-            error_type=type(exc).__name__,
-            error=str(exc),
+            "web_search failed: query=%r error=%s: %s",
+            query,
+            type(exc).__name__,
+            exc,
         )
         return [
             Source(
