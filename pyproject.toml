@@ -71,7 +71,6 @@ select = ["E", "F", "I", "UP"]
 "tests/**/*.py" = ["E501"]
 "docs/**/*.py" = ["E501"]
 "run_research.py" = ["E501"]
-"speed_test.py"   = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

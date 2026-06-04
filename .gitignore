@@ -95,3 +95,5 @@ $RECYCLE.BIN/
 *.bak
 *.swp
 *.orig
+docs/last_session.txt
+docs/*.pdf
