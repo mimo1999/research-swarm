@@ -94,6 +94,26 @@ class FindingSynthesis(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+def _serialize_tool_result(result: Any, max_chars: int = 8000) -> str:
+    """Serialize a tool result to a JSON string safe for inclusion in a ToolMessage.
+
+    A naive ``json.dumps(result)[:max_chars]`` truncation can produce invalid JSON
+    when the result is a list of source dicts whose snippets push the total length
+    past the limit — ``json.loads`` then silently fails and all source metadata is
+    lost.  This function truncates per-item snippets first so the outer JSON array
+    always remains valid and ``_extract_sources_from_messages`` can parse it.
+    """
+    if isinstance(result, list):
+        trimmed = []
+        for item in result:
+            if isinstance(item, dict) and "snippet" in item and isinstance(item["snippet"], str):
+                item = {**item, "snippet": item["snippet"][:600]}
+            trimmed.append(item)
+        result = trimmed
+    serialized = json.dumps(result, default=str)
+    return serialized[:max_chars]
+
+
 async def _run_tool_loop(
     sub_question: str,
     session_id: str,
@@ -131,7 +151,7 @@ async def _run_tool_loop(
 
             messages.append(
                 ToolMessage(
-                    content=json.dumps(result, default=str)[:4000],
+                    content=_serialize_tool_result(result),
                     tool_call_id=tool_id,
                 )
             )
