@@ -97,30 +97,27 @@ on every task rather than falling back immediately from memory.
 **Models:** `bge-small-en-v1.5` (dense) + `ms-marco-MiniLM-L-6-v2` (reranker, query-length-guarded)
 **Guard:** reranking skipped when query word count > 8 (guard fires for SciFact and ArguAna)
 
-### BEIR/SciFact — before query-length guard
+### BEIR/SciFact (seed 42, 100 queries)
 
-| Method | Recall@5 | Recall@10 | nDCG@10 |
+`mean_query_words=12.0`, `rerank_skipped=75/100`.
+
+| Method | Recall@5 | Recall@10 | nDCG@10 | Δ nDCG@10 |
+|---|---|---|---|---|
+| Dense (BGE) | 0.777 | 0.828 | **0.749** | — |
+| + Cross-encoder, no guard | 0.700 | 0.795 | 0.647 | −0.101 |
+| + Cross-encoder, guard > 8 words | 0.737 | 0.798 | **0.696** | **−0.052** |
+
+The guard skips 75 % of queries (> 8 words) and halves the regression.
+25 shorter claims (≤ 8 words) are still reranked and remain somewhat
+out-of-distribution for the MS MARCO cross-encoder.
+
+### BEIR/NFCorpus and BEIR/ArguAna
+
+| Dataset | Mean query words | Guard fires? | Status |
 |---|---|---|---|
-| Dense (BGE) | 0.777 | 0.828 | **0.748** |
-| + Cross-encoder (no guard) | 0.700 | 0.795 | 0.647 |
-
-SciFact queries are 15–25-word scientific claim sentences.
-`ms-marco-MiniLM-L-6-v2` was trained on 2–5-word keyword queries (MS MARCO);
-the distribution mismatch causes nDCG@10 to drop by **−0.10**.
-Individual failures: "IRG1 has antiviral effects..." (7 words) and
-"Vitamin D deficiency is unrelated to birth weight" (8 words) both degrade
-from dense nDCG=1.0 to reranked nDCG=0.0.
-
-### Expected behaviour after query-length guard
-
-| Dataset | Mean query words | Reranker fires? | Expected delta |
-|---|---|---|---|
-| BEIR/SciFact | ~20 words | No (all > 8) | 0 (guard preserves dense) |
-| BEIR/NFCorpus | ~4 words | Yes (most < 8) | Positive (short med. queries) |
-| BEIR/ArguAna | ~100+ words | No (all > 8) | 0 (guard preserves dense) |
-
-Results for NFCorpus and ArguAna are pending the current background run
-(corpus embedding is the bottleneck at ~15–45 min per dataset on CPU).
+| BEIR/SciFact | ~12 words | 75 % skipped | ✓ done above |
+| BEIR/NFCorpus | ~4 words | rarely | pending background run |
+| BEIR/ArguAna | ~100+ words | 100 % skipped | pending background run |
 
 ---
 
