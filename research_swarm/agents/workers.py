@@ -140,7 +140,12 @@ async def run_worker(
     )
 
     tool_map       = {t.name: t for t in tools}
-    llm_with_tools = llm.bind_tools(tools)
+    # Shallow mode has only one tool turn, so require that turn to gather
+    # evidence instead of allowing the model to answer from memory.
+    if raw_depth == "shallow":
+        llm_with_tools = llm.bind_tools(tools, tool_choice="required")
+    else:
+        llm_with_tools = llm.bind_tools(tools)
     synthesis_llm  = llm.with_structured_output(FindingSynthesis)
 
     logger.info("Worker[%s] researching: %s", role.value, sub_question[:80])

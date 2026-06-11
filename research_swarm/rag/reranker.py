@@ -44,6 +44,17 @@ def _get_cross_encoder():
         return None
 
 
+_RERANK_MAX_WORDS = 8
+"""Skip reranking when the query exceeds this many words.
+
+``ms-marco-MiniLM-L-6-v2`` was trained on short MS MARCO keyword queries
+(typically 2–5 words).  Long, sentence-style queries — such as scientific
+claims or natural-language questions — are out-of-distribution and the
+cross-encoder consistently mis-scores them, reducing nDCG versus dense
+retrieval alone.  Returning the dense-ranked list unchanged is safer.
+"""
+
+
 def rerank(
     query: str,
     chunks: list[dict],
@@ -63,6 +74,14 @@ def rerank(
     """
     if not chunks:
         return chunks
+
+    # Long sentence-style queries are out-of-distribution for ms-marco models.
+    if len(query.split()) > _RERANK_MAX_WORDS:
+        logger.debug(
+            "Skipping rerank: query has %d words (> %d threshold).",
+            len(query.split()), _RERANK_MAX_WORDS,
+        )
+        return chunks[:top_k] if top_k else chunks
 
     model = _get_cross_encoder()
     if model is None:
