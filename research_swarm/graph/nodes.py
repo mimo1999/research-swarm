@@ -245,7 +245,15 @@ def route_from_dispatch(state: AgentState):
 
     if not targets:
         # Nothing to research — bounce through a no-op worker to collect
-        return [Send("collect_node", {"active_sub_question": None})]
+        return [Send("collect_node", {"active_sub_question": None,
+                                      "session_id": state.get("session_id", "default")})]
+
+    # Pass all state fields worker_node needs — Send gives it ONLY the payload dict,
+    # not the full graph state, so we must explicitly forward session context.
+    session_id     = state.get("session_id", "default")
+    query          = state.get("query")
+    model_provider = state.get("model_provider")
+    model_name     = state.get("model_name")
 
     sends = []
     for sq in targets:
@@ -253,6 +261,11 @@ def route_from_dispatch(state: AgentState):
         sends.append(Send("worker_node", {
             "active_sub_question": sq,
             "active_worker_role":  role.value,
+            "session_id":          session_id,
+            "query":               query,
+            "model_provider":      model_provider,
+            "model_name":          model_name,
+            "findings":            findings,
         }))
     return sends
 
