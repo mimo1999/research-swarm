@@ -420,6 +420,28 @@ class TestRunCriticDirect:
             "critic must overwrite the hallucinated finding_id with the real one"
 
     @pytest.mark.asyncio
+    async def test_null_finding_id_is_fixed(self):
+        """LLM returning finding_id=null must not be dropped; critic stamps the real ID."""
+        from research_swarm.agents.critic import run_critic
+
+        finding = _make_finding("Q?")
+        null_id_critique = Critique(
+            finding_id=None,
+            verdict=CritiqueVerdict.weak,
+            reasoning="needs more evidence",
+            suggested_followup="Find primary sources",
+        )
+        mock_llm = MagicMock()
+        mock_llm.with_structured_output.return_value.ainvoke = AsyncMock(return_value=null_id_critique)
+
+        state = _make_state(findings=[finding])
+        (result,) = await run_critic(state, mock_llm)
+
+        assert result.finding_id == finding.id, \
+            "null finding_id from LLM must be replaced with the real finding id"
+        assert result.verdict == CritiqueVerdict.weak
+
+    @pytest.mark.asyncio
     async def test_llm_failure_falls_back_to_supported_verdict(self):
         """If the structured output call raises, critic falls back to 'supported'.
 

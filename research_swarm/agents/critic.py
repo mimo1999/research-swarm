@@ -33,12 +33,14 @@ _SYSTEM_PROMPT = (
 
 _FINDING_TEMPLATE = """\
 Finding to review:
+  Finding ID   : {finding_id}
   Sub-question : {sub_question}
   Claim        : {claim}
   Confidence   : {confidence}
   Sources      : {n_sources} source(s)
   Evidence     : {evidence_summary}
 
+Set `finding_id` in your JSON response to exactly: {finding_id}
 Assign a verdict.
 """
 
@@ -80,6 +82,7 @@ async def run_critic(
 
         user_msg = HumanMessage(
             content=_FINDING_TEMPLATE.format(
+                finding_id=fid,
                 sub_question=sub_q,
                 claim=claim,
                 confidence=confidence,
