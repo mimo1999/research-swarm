@@ -32,6 +32,17 @@ from research_swarm.rag.indexes import build_summary_index, load_vector_index
 
 logger = logging.getLogger(__name__)
 
+# Prevent LlamaIndex from defaulting to OpenAI when no API key is set.
+# Individual engine builders pass an explicit llm= when Ollama is available.
+# This must run at import time before any index.as_query_engine() call.
+try:
+    from llama_index.core import Settings as _LlamaSettings
+    from llama_index.core.llms.mock import MockLLM as _MockLLM
+    if _LlamaSettings._llm is None:
+        _LlamaSettings.llm = _MockLLM()
+except Exception:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Ollama probe
@@ -104,6 +115,9 @@ def _vector_query_engine(
             similarity_top_k=top_k,
             response_mode="compact",
         )
+    # No Ollama LLM — MockLLM is set as the LlamaIndex global default at module
+    # import time (see top of file), so as_query_engine() won't try to load OpenAI.
+    # response_mode="no_text" means the LLM is never actually invoked.
     return index.as_query_engine(
         similarity_top_k=top_k,
         response_mode="no_text",
