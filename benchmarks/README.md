@@ -1,4 +1,4 @@
-# Benchmark datasets
+﻿# Benchmark datasets
 
 Download the benchmark inputs with:
 
@@ -48,7 +48,7 @@ poetry run python benchmarks/run_beir_smoke.py
 | Elapsed | 806 s (13 m 26 s) | 1244 s (20 m 44 s) | +438 s |
 | Median task time | 51.6 s | 81.2 s | +30 s |
 | **Mean answer score** | **0.197** | **0.225** | **+0.028** |
-| Grounded rate | — | 0 % | — |
+| Grounded rate | — | 0 % → fix pending | — |
 
 Note: longer elapsed time in Run 2 reflects the model actually using the retrieval tool
 on every task rather than falling back immediately from memory.
@@ -68,13 +68,18 @@ on every task rather than falling back immediately from memory.
 
 **Remaining gaps (after tool_choice fix):**
 
-1. **Grounded rate = 0 %** — `_extract_sources_from_messages` silently drops all
-   source metadata because `json.dumps(sources)[:4000]` truncates mid-array when
-   five sources with 800-char snippets serialise to ~5 kB.  `json.loads` fails on
-   the truncated string; no `Source` objects are extracted; all findings carry
-   `evidence=[]`.  **Fixed in commit `69f9d36`** (`_serialize_tool_result` now
-   truncates per-item snippets to 600 chars before encoding, keeping the JSON
-   valid).  The next benchmark run (post-fix) should show grounded_rate > 0.
+1. **Grounded rate = 0 %** — two compounding bugs, both fixed:
+
+   - *JSON truncation* ():  cut mid-array;
+      failed silently; all source metadata was lost.
+      now truncates per-item snippets before encoding.
+
+   - *Wrong session_id* (this change): the `retrieve_from_rag` tool required the
+     LLM to supply the session_id (a long UUID) in its tool call arguments.  The
+     model hallucinated or ignored it, so every retrieval query hit an empty Chroma
+     collection and returned `[]`.  **Fix: `session_id` is now pre-baked at tool
+     construction time** (`build_retriever_tool(session_id=session_id)` in
+     `_get_researcher_tools`); the LLM only needs to provide the `query`.
 
 2. **Multi-hop HotpotQA bridge questions** — shallow mode dispatches one worker
    with one tool turn.  Bridge questions require chaining two facts across
@@ -111,13 +116,39 @@ The guard skips 75 % of queries (> 8 words) and halves the regression.
 25 shorter claims (≤ 8 words) are still reranked and remain somewhat
 out-of-distribution for the MS MARCO cross-encoder.
 
-### BEIR/NFCorpus and BEIR/ArguAna
+### BEIR/NFCorpus (seed 42, 100 queries)
 
-| Dataset | Mean query words | Guard fires? | Status |
-|---|---|---|---|
-| BEIR/SciFact | ~12 words | 75 % skipped | ✓ done above |
-| BEIR/NFCorpus | ~4 words | rarely | pending background run |
-| BEIR/ArguAna | ~100+ words | 100 % skipped | pending background run |
+`mean_query_words=3.2`, `rerank_skipped=4/100`.
+
+| Method | Recall@5 | Recall@10 | nDCG@10 | Δ nDCG@10 |
+|---|---|---|---|---|
+| Dense (BGE) | 0.130 | 0.165 | **0.341** | — |
+| + Cross-encoder, guard > 8 words | 0.122 | 0.160 | **0.324** | **−0.016** |
+
+Short keyword queries (avg 3.2 words) are mostly within the MS MARCO
+cross-encoder's training distribution, so the guard fires rarely (4/100).
+The remaining −0.016 delta is domain mismatch: the encoder was trained on
+web QA, not biomedical literature.
+
+### BEIR/ArguAna (seed 42, 100 queries)
+
+`mean_query_words=194.9`, `rerank_skipped=100/100`.
+
+| Method | Recall@5 | Recall@10 | nDCG@10 | Δ nDCG@10 |
+|---|---|---|---|---|
+| Dense (BGE) | 0.650 | 0.760 | **0.391** | — |
+| + Cross-encoder, guard > 8 words | 0.650 | 0.760 | **0.391** | **+0.000** |
+
+All 100 ArguAna queries exceed 8 words (avg ~195 words), so the guard fires
+universally and the reranker is bypassed entirely — identical scores.
+
+### BEIR summary (3 datasets, seed 42, 100 queries each)
+
+| Dataset | Corpus | Dense nDCG@10 | Reranked nDCG@10 | Δ nDCG@10 | Guard fires |
+|---|---|---|---|---|---|
+| SciFact | 5,183 docs | 0.749 | 0.696 | −0.052 | 75 % |
+| NFCorpus | 3,633 docs | 0.341 | 0.324 | −0.016 | 4 % |
+| ArguAna | 8,674 docs | 0.391 | 0.391 | +0.000 | 100 % |
 
 ---
 
@@ -128,7 +159,8 @@ out-of-distribution for the MS MARCO cross-encoder.
 - [x] Extend BEIR run with `nfcorpus` and `arguana` — **script done** (commit `c206bb0`);
       results pending the current background run.
 - [x] Fix ToolMessage JSON truncation that dropped all source metadata — **done** (commit `69f9d36`).
-- [ ] Re-run 24-task smoke benchmark with the JSON fix applied to measure grounded_rate.
+- [ ] Re-run 24-task smoke benchmark with both fixes applied (JSON + session_id pre-baking) to measure grounded_rate.
+- [x] Pre-bake session_id into retriever tool so LLM cannot hallucinate it — **done** (this change).
 - [ ] Add SciFact label-extraction post-processor to `_answer_score` so that
       SUPPORT / CONTRADICT tasks are scored correctly.
 - [ ] Consider a biomedical cross-encoder (e.g. `cross-encoder/nboost/pt-biobert-base-msmarco`)

@@ -41,10 +41,10 @@ logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _get_researcher_tools(max_sources: int | None = None):
+def _get_researcher_tools(max_sources: int | None = None, session_id: str | None = None):
     tools = [web_search, arxiv_search, fetch_url]
     try:
-        tools.append(build_retriever_tool(max_sources=max_sources))
+        tools.append(build_retriever_tool(max_sources=max_sources, session_id=session_id))
     except Exception as exc:
         logger.warning("RAG retriever unavailable: %s", exc)
     return tools
@@ -282,7 +282,8 @@ async def worker_node(state: AgentState) -> dict[str, Any]:
 
     # Workers use the standard tier (quality matters here)
     llm   = _get_tiered_state_llm(state, "standard")
-    tools = _get_researcher_tools(max_sources=max_sources)
+    session_id = state.get("session_id", "default")
+    tools = _get_researcher_tools(max_sources=max_sources, session_id=session_id)
 
     finding = await run_worker(sub_question, role, state, llm, tools)
 

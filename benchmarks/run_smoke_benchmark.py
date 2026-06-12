@@ -362,8 +362,8 @@ async def main(args: argparse.Namespace) -> None:
     import research_swarm.rag.query_engines as query_engines
 
     query_engines._ollama_probe_cache = (False, time.monotonic())
-    nodes._get_researcher_tools = lambda max_sources=None: [
-        build_retriever_tool(max_sources=max_sources)
+    nodes._get_researcher_tools = lambda max_sources=None, session_id=None: [
+        build_retriever_tool(max_sources=max_sources, session_id=session_id)
     ]
 
     tasks = build_tasks(args.limit)

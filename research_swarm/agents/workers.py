@@ -95,7 +95,6 @@ Available tools:
 Strategy ({depth} mode, {role} perspective):
 {strategy}
 
-Session ID (required for retrieve_from_rag): {session_id}
 Audience: {audience}
 """
 
@@ -134,8 +133,7 @@ async def run_worker(
             role=role.value,
             depth=raw_depth,
             strategy=strategy,
-            session_id=session_id,
-            audience=audience,
+                audience=audience,
         )
     )
 
@@ -159,6 +157,7 @@ async def run_worker(
     )
 
     sources = _extract_sources_from_messages(messages)
+    logger.info("Worker[%s] extracted %d sources", role.value, len(sources))
 
     synthesis_messages = messages + [HumanMessage(content=_synthesis_prompt(sub_question))]
     try:
@@ -188,7 +187,7 @@ async def run_worker(
         sub_question=sub_question,
     )
     logger.info(
-        "Worker[%s] produced finding (conf=%.2f): %s",
-        role.value, finding.confidence, finding.claim[:80],
+        "Worker[%s] produced finding (conf=%.2f, evidence=%d): %s",
+        role.value, finding.confidence, len(finding.evidence), finding.claim[:80],
     )
     return finding
