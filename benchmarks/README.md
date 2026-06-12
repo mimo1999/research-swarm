@@ -68,18 +68,31 @@ on every task rather than falling back immediately from memory.
 
 **Remaining gaps (after tool_choice fix):**
 
-1. **Grounded rate = 0 %** — two compounding bugs, both fixed:
+1. **Grounded rate = 0 %** — three compounding bugs, all fixed (commit `ce63268`):
 
-   - *JSON truncation* ():  cut mid-array;
-      failed silently; all source metadata was lost.
-      now truncates per-item snippets before encoding.
+   - *JSON truncation* (commit `69f9d36`): ToolMessage content was cut mid-array;
+      JSON parse failed silently; all source metadata was lost.
+      Fix: truncate per-item snippets before encoding, never the array boundary.
 
-   - *Wrong session_id* (this change): the `retrieve_from_rag` tool required the
+   - *Wrong session_id* (commit `01bab66`): the `retrieve_from_rag` tool required the
      LLM to supply the session_id (a long UUID) in its tool call arguments.  The
      model hallucinated or ignored it, so every retrieval query hit an empty Chroma
      collection and returned `[]`.  **Fix: `session_id` is now pre-baked at tool
      construction time** (`build_retriever_tool(session_id=session_id)` in
      `_get_researcher_tools`); the LLM only needs to provide the `query`.
+
+   - *LangGraph Send payload isolation* (commit `ce63268`): `Send("worker_node", payload)`
+     gives the receiving node ONLY the payload dict — the full graph state is NOT merged.
+     `session_id` was missing from the payload so `worker_node` queried the wrong Chroma
+     collection.  Fix: explicitly forward `session_id`, `query`, `model_provider`, and
+     `model_name` in every Send payload.
+
+   - *Fact-checker confidence floor* (commit `ce63268`): `minimax-m2.5:cloud`
+     systematically returns `confidence_score=0.0` for valid evidence-backed claims.
+     The writer filters out findings with confidence < 0.1, so every evidence-backed
+     finding was discarded, leaving `references=[]`.  Fix: `max(score, 0.15)` when
+     evidence is present — a finding backed by real sources can never score below the
+     no-evidence baseline (0.1).
 
 2. **Multi-hop HotpotQA bridge questions** — shallow mode dispatches one worker
    with one tool turn.  Bridge questions require chaining two facts across
@@ -159,7 +172,7 @@ universally and the reranker is bypassed entirely — identical scores.
 - [x] Extend BEIR run with `nfcorpus` and `arguana` — **script done** (commit `c206bb0`);
       results pending the current background run.
 - [x] Fix ToolMessage JSON truncation that dropped all source metadata — **done** (commit `69f9d36`).
-- [ ] Re-run 24-task smoke benchmark with both fixes applied (JSON + session_id pre-baking) to measure grounded_rate.
+- [ ] Re-run 24-task smoke benchmark with all three fixes applied to measure grounded_rate > 0.
 - [x] Pre-bake session_id into retriever tool so LLM cannot hallucinate it — **done** (this change).
 - [ ] Add SciFact label-extraction post-processor to `_answer_score` so that
       SUPPORT / CONTRADICT tasks are scored correctly.
