@@ -104,7 +104,10 @@ async def run_fact_checker(
 
         try:
             result: FactCheckResult = await structured_llm.ainvoke([system_msg, user_msg])
-            new_confidence = result.confidence_score
+            # Apply a floor of 0.15 when evidence is present: a finding backed by
+            # real sources should never score below the no-evidence baseline (0.1).
+            # This guards against models that systematically return 0.0.
+            new_confidence = max(result.confidence_score, 0.15)
         except Exception as exc:
             logger.warning("FactChecker failed for finding %s: %s", fid[:8], exc)
             new_confidence = _field(finding, "confidence", 0.5)
