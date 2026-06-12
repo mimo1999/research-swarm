@@ -79,7 +79,7 @@ All settings are overridable from the sidebar at runtime.
 | **Supervisor** | Creates the research plan with sub-questions, complexity score, and worker-role assignments. Only LLM-invoked once per session. |
 | **Workers** (×N) | Parallel ReAct tool loops — each researches one sub-question with a role-specific strategy (academic, industry, skeptic, benchmark, or general). |
 | **Critic** | Reviews each finding: `supported / weak / refuted`. Weak/refuted findings trigger another dispatch round (up to the round cap). |
-| **Fact-Checker** | Cross-checks claims against source snippets; adjusts confidence scores. |
+| **Fact-Checker** | Cross-checks claims against source snippets; adjusts confidence scores. Evidence-backed findings are floored at 0.15 so a mis-calibrated model can't zero out a claim that has real sources. |
 | **Writer** | Synthesises validated findings into a structured report. Runs a faithfulness check (embedding cosine similarity) and rewrites once if score < 0.25. |
 
 ---
@@ -99,7 +99,7 @@ All settings are overridable from the sidebar at runtime.
 ## Development
 
 ```bash
-# Run all 180 tests (fully offline — all LLMs mocked)
+# Run all 181 tests (fully offline — all LLMs mocked)
 poetry run pytest
 
 # Specific test file
