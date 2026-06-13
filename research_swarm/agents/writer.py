@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from research_swarm.agents._utils import _field, _latest_verdicts, json_output_instruction
+from research_swarm.agents._utils import _field, _latest_verdicts, schema_output_instruction
 from research_swarm.schemas import FinalReport, ReportSection, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -43,19 +43,7 @@ _FINDINGS_TEMPLATE = (
 )
 
 # Appended after .format() so the JSON braces don't clash with str.format()
-_FINDINGS_JSON_SUFFIX = json_output_instruction({
-    "title": "<report title>",
-    "exec_summary": "<executive summary in Markdown>",
-    "sections": [
-        {
-            "heading": "<section heading>",
-            "body_md": "<section body in Markdown>",
-            "citations": [1],
-        }
-    ],
-    "methodology": "<research methodology>",
-    "limitations": "<known limitations>",
-})
+_FINDINGS_JSON_SUFFIX = schema_output_instruction(FinalReport)
 
 
 def _collect_references(findings: list) -> list[Source]:

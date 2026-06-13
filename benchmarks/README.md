@@ -44,32 +44,41 @@ Corpus embeddings are cached to `data/benchmark_results/emb_cache/` on first run
 
 ---
 
-## Results — smoke benchmark (2026-06-11 run 2, seed 42)
+## Results — model comparison (2026-06-14, seed 42, 24 tasks)
 
-**Model:** `minimax-m2.5:cloud` via Ollama · **Depth:** shallow · **Concurrency:** 2
-**Fix applied:** `tool_choice="required"` in shallow mode — forces retrieval on every task
+All runs: shallow depth, concurrency 2, sequential (no rate-limit interference).
+Fixes applied: grounding bug (Send payload), schema-in-prompt for all structured LLM calls.
+
+| Model | Answer score | Grounded rate | Faithfulness | Median s | Notes |
+|---|---|---|---|---|---|
+| **gemma4:31b-cloud** *(default)* | 0.265 | **75 %** | **0.627** | **17 s** | Best grounding + faithfulness; fastest |
+| minimax-m2.5:cloud | **0.371** | 4 % | 0.026 | 48 s | Answers from memory; bypasses RAG |
+| nemotron-3-nano:30b-cloud | 0.238 | 25 % | 0.214 | 29 s | Moderate grounding |
+
+`gemma4:31b-cloud` is the default. Its lower answer score vs minimax reflects appropriate epistemic restraint — it reports what the retrieved evidence supports rather than filling gaps from parametric memory. Grounding (75%) and faithfulness (0.627) are the operative quality metrics for a retrieval-based research system.
+
+### By dataset — gemma4:31b-cloud (default)
+
+| Dataset | Tasks | Answer score | Mean s |
+|---|---|---|---|
+| alce/asqa | 3 | 0.056 | 71 s |
+| alce/eli5 | 2 | 0.000 | 33 s |
+| alce/qampari | 3 | 0.067 | 48 s |
+| hotpotqa/bridge | 4 | 0.000 | 23 s |
+| hotpotqa/comparison | 4 | 0.500 | 17 s |
+| scifact | 8 | 0.500 | 20 s |
+
+### Historical: minimax-m2.5:cloud (2026-06-11, pre-fix baseline)
+
+**Model:** `minimax-m2.5:cloud` · **Fix applied:** `tool_choice="required"` in shallow mode
 
 | Metric | Run 1 (before fix) | Run 2 (after fix) | Delta |
 |---|---|---|---|
 | Tasks | 24 / 24 ok | 24 / 24 ok | — |
-| Elapsed | 806 s (13 m 26 s) | 1244 s (20 m 44 s) | +438 s |
+| Elapsed | 806 s | 1244 s | +438 s |
 | Median task time | 51.6 s | 81.2 s | +30 s |
 | **Mean answer score** | **0.197** | **0.225** | **+0.028** |
-| Grounded rate | — | 0 % → fix pending | — |
-
-Note: longer elapsed time in Run 2 reflects the model actually using the retrieval tool
-on every task rather than falling back immediately from memory.
-
-### By dataset
-
-| Dataset | Tasks | Answer score (run 1) | Answer score (run 2) | Delta |
-|---|---|---|---|---|
-| alce/asqa | 3 | 0.056 | 0.222 | **+0.167** |
-| alce/eli5 | 2 | 0.000 | 0.000 | — |
-| alce/qampari | 3 | 0.189 | 0.245 | +0.056 |
-| hotpotqa/bridge | 4 | 0.000 | 0.000 | — |
-| hotpotqa/comparison | 4 | 0.500 | 0.500 | — |
-| scifact | 8 | 0.250 | 0.250 | — |
+| Grounded rate | — | 0 % (bug) | — |
 
 ### Root-cause analysis
 
@@ -181,9 +190,12 @@ universally and the reranker is bypassed entirely.
       (Run 2: mean_answer_score 0.197 → 0.225; ALCE/ASQA +167%).
 - [x] Extend BEIR run with `nfcorpus` and `arguana` — **done** (2026-06-13).
 - [x] Fix ToolMessage JSON truncation that dropped all source metadata — **done** (commit `69f9d36`).
-- [ ] Re-run 24-task smoke benchmark with all three fixes applied to measure grounded_rate > 0.
-- [x] Pre-bake session_id into retriever tool so LLM cannot hallucinate it — **done** (this change).
+- [x] Re-run smoke benchmark with all fixes applied — **done** (2026-06-14). grounded_rate 0 → 75 % with gemma4.
+- [x] Pre-bake session_id into retriever tool so LLM cannot hallucinate it — **done**.
+- [x] Schema-in-prompt for all structured LLM calls — **done** (2026-06-14). `schema_output_instruction(ModelClass)` injected alongside `with_structured_output` in every agent; grounded_rate on gemma4 jumped from 17 % → 75 %.
+- [x] Switch default model to `gemma4:31b-cloud` — **done** (2026-06-14). Best grounding (75 %) and faithfulness (0.627) across tested models.
 - [ ] Add SciFact label-extraction post-processor to `_answer_score` so that
       SUPPORT / CONTRADICT tasks are scored correctly.
-- [ ] Consider a biomedical cross-encoder (e.g. `cross-encoder/nboost/pt-biobert-base-msmarco`)
-      for scientific corpora once the query-length guard is validated on all three BEIR subsets.
+- [ ] Investigate remaining 3/24 JSON parse failures in worker synthesis for gemma4
+      (structured-output call after multi-turn tool loop).
+- [ ] Consider a biomedical cross-encoder for scientific corpora once the query-length guard is validated on all three BEIR subsets.

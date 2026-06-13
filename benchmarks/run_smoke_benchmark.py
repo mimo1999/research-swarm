@@ -217,7 +217,12 @@ def _ingest_task(task: BenchmarkTask, session_id: str) -> int:
     return chunks
 
 
-def _initial_state(task: BenchmarkTask, session_id: str) -> dict[str, Any]:
+def _initial_state(
+    task: BenchmarkTask,
+    session_id: str,
+    model_provider: str = "ollama",
+    model_name: str = "minimax-m2.5:cloud",
+) -> dict[str, Any]:
     return {
         "messages": [],
         "query": ResearchQuery(
@@ -236,8 +241,8 @@ def _initial_state(task: BenchmarkTask, session_id: str) -> dict[str, Any]:
         "iteration_count": 0,
         "next_agent": None,
         "session_id": session_id,
-        "model_provider": "ollama",
-        "model_name": "minimax-m2.5:cloud",
+        "model_provider": model_provider,
+        "model_name": model_name,
         "schema_version": 2,
         "research_rounds": 0,
         "pre_dispatch_finding_ids": [],
@@ -246,13 +251,19 @@ def _initial_state(task: BenchmarkTask, session_id: str) -> dict[str, Any]:
     }
 
 
-async def run_task(task: BenchmarkTask, timeout: float) -> dict[str, Any]:
+async def run_task(
+    task: BenchmarkTask,
+    timeout: float,
+    model_provider: str = "ollama",
+    model_name: str = "minimax-m2.5:cloud",
+) -> dict[str, Any]:
     session_id = f"bench-{task.id}-{uuid.uuid4().hex[:6]}"
     started = time.perf_counter()
     result: dict[str, Any] = {
         "task_id": task.id,
         "dataset": task.dataset,
         "status": "error",
+        "model": model_name,
     }
     try:
         chunks = await asyncio.to_thread(_ingest_task, task, session_id)
@@ -261,7 +272,9 @@ async def run_task(task: BenchmarkTask, timeout: float) -> dict[str, Any]:
 
         async def execute() -> Any:
             async for _ in graph.astream(
-                _initial_state(task, session_id), config, stream_mode="updates"
+                _initial_state(task, session_id, model_provider, model_name),
+                config,
+                stream_mode="updates",
             ):
                 pass
             return (await graph.aget_state(config)).values
@@ -303,6 +316,7 @@ def _write_summary(path: Path, results: list[dict[str, Any]], elapsed: float) ->
     successful = [row for row in results if row["status"] == "ok"]
     summary = {
         "seed": SEED,
+        "model": results[0].get("model", "") if results else "",
         "tasks": len(results),
         "successful": len(successful),
         "status_counts": dict(Counter(row["status"] for row in results)),
@@ -346,14 +360,16 @@ def _write_summary(path: Path, results: list[dict[str, Any]], elapsed: float) ->
 
 
 async def main(args: argparse.Namespace) -> None:
-    settings.default_model_provider = "ollama"
-    settings.default_model_name = "minimax-m2.5:cloud"
-    settings.tier_fast_provider = "ollama"
-    settings.tier_fast_model = "minimax-m2.5:cloud"
-    settings.tier_standard_provider = "ollama"
-    settings.tier_standard_model = "minimax-m2.5:cloud"
-    settings.tier_thorough_provider = "ollama"
-    settings.tier_thorough_model = "minimax-m2.5:cloud"
+    model_provider = "ollama"
+    model_name = args.model
+    settings.default_model_provider = model_provider
+    settings.default_model_name = model_name
+    settings.tier_fast_provider = model_provider
+    settings.tier_fast_model = model_name
+    settings.tier_standard_provider = model_provider
+    settings.tier_standard_model = model_name
+    settings.tier_thorough_provider = model_provider
+    settings.tier_thorough_model = model_name
     settings.max_sources = 5
     settings.max_llm_calls = 12
 
@@ -366,6 +382,7 @@ async def main(args: argparse.Namespace) -> None:
         build_retriever_tool(max_sources=max_sources, session_id=session_id)
     ]
 
+    print(f"MODEL  {model_provider}/{model_name}", flush=True)
     tasks = build_tasks(args.limit)
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -381,10 +398,10 @@ async def main(args: argparse.Namespace) -> None:
     write_lock = asyncio.Lock()
     started = time.perf_counter()
 
-    async def guarded(task: BenchmarkTask) -> None:
+    async def guarded(task: BenchmarkTask, mp: str, mn: str) -> None:
         async with semaphore:
             print(f"START {task.id}", flush=True)
-            result = await run_task(task, args.timeout)
+            result = await run_task(task, args.timeout, mp, mn)
             async with write_lock:
                 results.append(result)
                 with results_path.open("a", encoding="utf-8") as handle:
@@ -395,7 +412,9 @@ async def main(args: argparse.Namespace) -> None:
                 flush=True,
             )
 
-    await asyncio.gather(*(guarded(task) for task in tasks))
+    await asyncio.gather(*(
+        guarded(task, model_provider, model_name) for task in tasks
+    ))
     elapsed = time.perf_counter() - started
     _write_summary(summary_path, results, elapsed)
     print(f"RESULTS {results_path}")
@@ -407,6 +426,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=DEFAULT_LIMIT)
     parser.add_argument("--concurrency", type=int, default=2)
     parser.add_argument("--timeout", type=float, default=300.0)
+    parser.add_argument("--model", type=str, default="gemma4:31b-cloud",
+                        help="Ollama model name (e.g. minimax-m2.5:cloud)")
     return parser.parse_args()
 
 

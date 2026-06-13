@@ -8,7 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from research_swarm.agents._utils import json_output_instruction
+from research_swarm.agents._utils import schema_output_instruction
 from research_swarm.schemas import ResearchPlan
 from research_swarm.schemas.state import AgentName
 
@@ -44,20 +44,7 @@ def _build_system_prompt(depth: str = "standard") -> str:
         "For shallow depth, always use role 'general'.\n"
         "Set complexity_score 0.0–1.0 (0 = single-fact, 1 = deep multi-faceted).\n\n"
         "Always set `plan`. Leave `next_agent` as \"dispatch\"."
-        + json_output_instruction({
-            "reasoning": "<why this decomposition covers the topic>",
-            "next_agent": "dispatch",
-            "plan": {
-                "sub_questions": ["<question 1>", "<question 2>"],
-                "strategy": "<overall research strategy>",
-                "required_tools": ["web_search", "arxiv_search"],
-                "complexity_score": 0.5,
-                "assignments": [
-                    {"sub_question": "<question 1>", "worker_role": "academic"},
-                    {"sub_question": "<question 2>", "worker_role": "skeptic"},
-                ],
-            },
-        })
+        + schema_output_instruction(SupervisorDecision)
     )
 
 

@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 
 def _field(obj, name: str, default=None):
@@ -16,13 +20,35 @@ def _field(obj, name: str, default=None):
     return getattr(obj, name, default)
 
 
-def json_output_instruction(example: dict) -> str:
-    """Return a system-prompt suffix that forces raw JSON output.
+def schema_output_instruction(schema_class: type) -> str:
+    """Return a system-prompt suffix that injects the full Pydantic schema.
 
     Works as a belt-and-suspenders measure alongside ``with_structured_output``:
     - ``with_structured_output`` enforces the schema at the API/parsing layer
     - This instruction enforces it at the prompt layer so models that ignore
       the schema parameter (common with Ollama cloud models) still comply.
+
+    Unlike the old ``json_output_instruction`` (hand-written example), this
+    generates the instruction from ``model_json_schema()`` so it stays in sync
+    with field names, types, descriptions, and constraints automatically.
+    """
+    schema = schema_class.model_json_schema()
+    return (
+        "\n\n"
+        "OUTPUT FORMAT — CRITICAL:\n"
+        "Your entire response MUST be a single raw JSON object.\n"
+        "Do NOT use markdown, code fences (```), bullet points, or any prose.\n"
+        "Do NOT include any text before or after the JSON.\n"
+        "Your response must conform to this JSON Schema:\n"
+        f"{json.dumps(schema, indent=2)}"
+    )
+
+
+def json_output_instruction(example: dict) -> str:
+    """Return a system-prompt suffix that forces raw JSON output (legacy).
+
+    Prefer ``schema_output_instruction`` for new code — it generates the
+    instruction from the Pydantic schema rather than a hand-written example.
     """
     return (
         "\n\n"

@@ -8,7 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from research_swarm.agents._utils import _field, _latest_verdicts, json_output_instruction
+from research_swarm.agents._utils import _field, _latest_verdicts, schema_output_instruction
 from research_swarm.schemas import Finding
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -16,6 +16,12 @@ if TYPE_CHECKING:
     from research_swarm.schemas.state import AgentState
 
 logger = logging.getLogger(__name__)
+
+
+class FactCheckResult(BaseModel):
+    confidence_score: float = Field(ge=0.0, le=1.0)
+    notes: str = Field(default="")
+
 
 _SYSTEM_PROMPT = (
     "You are a meticulous Fact-Checker. Given a research claim and its source evidence,"
@@ -25,10 +31,7 @@ _SYSTEM_PROMPT = (
     "  - Does each cited source actually contain text supporting the claim?\n"
     "  - Is the claim an overstatement or misrepresentation of the evidence?\n"
     "  - Are there contradictions between sources?"
-    + json_output_instruction({
-        "confidence_score": 0.0,
-        "notes": "<one sentence explaining your assessment>",
-    })
+    + schema_output_instruction(FactCheckResult)
 )
 
 _CLAIM_TEMPLATE = """\
@@ -39,11 +42,6 @@ Sources ({n}):
 
 Cross-check the claim against these sources and return a confidence score.
 """
-
-
-class FactCheckResult(BaseModel):
-    confidence_score: float = Field(ge=0.0, le=1.0)
-    notes: str = Field(default="")
 
 
 async def run_fact_checker(

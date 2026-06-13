@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from research_swarm.agents._utils import json_output_instruction
+from research_swarm.agents._utils import schema_output_instruction
 from research_swarm.schemas import Finding, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -42,6 +42,11 @@ def _norm(s: str) -> str:
     return s.strip().lower()
 
 
+class FindingSynthesis(BaseModel):
+    claim: str = Field(..., description="Concise claim answering the sub-question")
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 _SYSTEM_PROMPT = """\
 You are an expert Research Agent. Your goal is to answer a research sub-question
 by calling the available tools to gather evidence, then synthesising your findings.
@@ -70,28 +75,16 @@ _STRATEGY_DEFAULT = """\
 3. Fetch promising URLs for detail.
 4. Stop calling tools once you have enough evidence (3-5 good sources)."""
 
-_SYNTHESIS_JSON_SUFFIX = json_output_instruction({
-    "claim": "<one or two sentences summarising the answer>",
-    "confidence": 0.0,
-})
+_SYNTHESIS_JSON_SUFFIX = schema_output_instruction(FindingSynthesis)
 
 
 def _synthesis_prompt(sub_question: str) -> str:
-    """Build the synthesis prompt for a specific sub-question.
-
-    Kept as a function (not a module-level .format() template) so the JSON
-    example braces in _SYNTHESIS_JSON_SUFFIX don't clash with str.format().
-    """
+    """Build the synthesis prompt for a specific sub-question."""
     return (
         f"Based on the evidence gathered above, write a concise, factual claim that "
         f"directly answers the sub-question: \"{sub_question}\""
         + _SYNTHESIS_JSON_SUFFIX
     )
-
-
-class FindingSynthesis(BaseModel):
-    claim: str = Field(..., description="Concise claim answering the sub-question")
-    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
 def _serialize_tool_result(result: Any, max_chars: int = 8000) -> str:

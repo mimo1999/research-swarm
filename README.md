@@ -47,7 +47,7 @@ Windows: double-click `start.bat` - checks deps, optionally starts Ollama, opens
 ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY / leave blank for Ollama
 TAVILY_API_KEY=...             # required for web search
 DEFAULT_MODEL_PROVIDER=ollama  # anthropic | openai | ollama
-DEFAULT_MODEL_NAME=gemma4:e2b
+DEFAULT_MODEL_NAME=gemma4:31b-cloud
 DEFAULT_DEPTH=shallow          # shallow | standard | deep
 MAX_ITERATIONS=1
 MAX_SOURCES=3
@@ -102,13 +102,13 @@ RAG retrieval evaluated on three [BEIR](https://github.com/beir-cellar/beir) dat
 
 | Dataset | BM25 ¹ | Contriever ¹ | BGE-Large ¹ | **Ours (BGE-small, dense)** | **Ours (+ reranker)** |
 |---|---|---|---|---|---|
-| SciFact | 0.678 | 0.677 | 0.752 | **0.749** | 0.696 |
-| NFCorpus | 0.321 | 0.328 | 0.381 | **0.341** | 0.324 |
-| ArguAna | 0.397 | 0.446 | 0.416 | **0.391** | 0.391 |
+| SciFact | 0.678 | 0.677 | 0.752 | **0.749** | **0.746** |
+| NFCorpus | 0.321 | 0.328 | 0.381 | 0.341 | **0.356** |
+| ArguAna | 0.397 | 0.446 | 0.416 | **0.391** | **0.391** |
 
 ¹ Published baselines from the [BEIR paper](https://arxiv.org/abs/2104.08663) and [Resources for Brewing BEIR](https://arxiv.org/abs/2306.07471). BGE-Large is `bge-large-en-v1.5`; our embedder is the much smaller `bge-small-en-v1.5` (~130 MB vs ~1.3 GB).
 
-The cross-encoder reranker (`ms-marco-MiniLM-L-6-v2`) is skipped for queries longer than 8 words - these scientific datasets have long queries so the guard fires often and the dense-only score is the operative result. See [`benchmarks/README.md`](benchmarks/README.md) for the full per-dataset breakdown.
+The cross-encoder reranker (`ms-marco-MiniLM-L-6-v2`) is guarded: skipped for queries longer than 8 words (most scientific queries) to avoid out-of-distribution degradation. On NFCorpus (short keyword queries, avg 3.2 words) it adds +1.5% nDCG@10. See [`benchmarks/README.md`](benchmarks/README.md) for the full per-dataset breakdown.
 
 ---
 
@@ -140,4 +140,4 @@ poetry run python run_research.py "your topic here"
 |---|---|---|
 | `anthropic` | `ANTHROPIC_API_KEY` | Claude Haiku (fast tier) / Sonnet (standard) / Opus (thorough). |
 | `openai` | `OPENAI_API_KEY` | GPT-4o-mini / GPT-4o. |
-| `ollama` | Ollama running locally | No API key. `start.bat` auto-starts `ollama serve`. Use `gemma4:e2b` for stability. |
+| `ollama` | Ollama running locally | No API key. `start.bat` auto-starts `ollama serve`. Default: `gemma4:31b-cloud` (best grounding + faithfulness). |

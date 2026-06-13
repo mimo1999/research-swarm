@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from research_swarm.agents._utils import _field, _latest_verdicts, json_output_instruction
+from research_swarm.agents._utils import _field, _latest_verdicts, schema_output_instruction
 from research_swarm.schemas import Critique, CritiqueVerdict, Finding
 
 if TYPE_CHECKING:
@@ -23,12 +23,7 @@ _SYSTEM_PROMPT = (
     "  refuted   -- the evidence contradicts or does not support the claim\n\n"
     "Be concise. If the verdict is weak or refuted, suggest a specific follow-up"
     " research question in `suggested_followup`."
-    + json_output_instruction({
-        "finding_id": "<uuid of the finding being reviewed>",
-        "verdict": "supported | weak | refuted",
-        "reasoning": "<one or two sentences explaining your verdict>",
-        "suggested_followup": "<specific follow-up question, or empty string if supported>",
-    })
+    + schema_output_instruction(Critique)
 )
 
 _FINDING_TEMPLATE = """\

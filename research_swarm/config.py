@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # App settings
     default_model_provider: str = "ollama"
-    default_model_name: str = "minimax-m2.5:cloud"
+    default_model_name: str = "gemma4:31b-cloud"
     default_depth: str = "shallow"
     max_iterations: int = 1
     max_sources: int = 3
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # cloud infrastructure using the credentials from `ollama login`.
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma4:e2b"
-    ollama_cloud_model: str = "minimax-m2.5:cloud"
+    ollama_cloud_model: str = "gemma4:31b-cloud"
     ollama_timeout: float = 120.0      # seconds
     ollama_deployment: str = "cloud"   # "local" | "cloud"
 
@@ -58,9 +58,9 @@ class Settings(BaseSettings):
     tier_fast_provider:     str = "ollama"
     tier_fast_model:        str = "gemma4:e2b"
     tier_standard_provider: str = "ollama"
-    tier_standard_model:    str = "minimax-m2.5:cloud"
+    tier_standard_model:    str = "gemma4:31b-cloud"
     tier_thorough_provider: str = "ollama"
-    tier_thorough_model:    str = "minimax-m2.5:cloud"
+    tier_thorough_model:    str = "gemma4:31b-cloud"
 
     # ── Research-loop limits by depth ────────────────────────────────────────
     # Maximum dispatch→workers→collect cycles before forcing progression
