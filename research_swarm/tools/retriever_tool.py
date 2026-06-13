@@ -55,7 +55,7 @@ def _do_retrieve(
         source = Source(
             url=metadata.get("url", metadata.get("file_path", "rag://" + session_id)),
             title=metadata.get("title", metadata.get("file_name", "")),
-            snippet=node.get_content()[:800],
+            snippet=node.get_content()[:2000],
             source_type=SourceType.retriever,
             credibility_score=float(node.score) if node.score is not None else 0.6,
         )

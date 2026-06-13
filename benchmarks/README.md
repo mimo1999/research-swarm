@@ -32,8 +32,15 @@ Results, the exact task manifest, and a summary are written to
 Run the BEIR retrieval + reranking benchmark with:
 
 ```powershell
-poetry run python benchmarks/run_beir_smoke.py
+poetry run python benchmarks/run_beir_reranker_compare.py
+# or a subset:
+poetry run python benchmarks/run_beir_reranker_compare.py --datasets scifact nfcorpus --queries 50
+# skip the embedding cache:
+poetry run python benchmarks/run_beir_reranker_compare.py --no-cache
 ```
+
+Corpus embeddings are cached to `data/benchmark_results/emb_cache/` on first run
+(~20 min total); subsequent runs load from disk and complete in a few minutes.
 
 ---
 
@@ -110,57 +117,60 @@ on every task rather than falling back immediately from memory.
 
 ---
 
-## Results — BEIR retrieval evaluation (2026-06-11, seed 42)
+## Results — BEIR retrieval evaluation (2026-06-13, seed 42)
 
 **Models:** `bge-small-en-v1.5` (dense) + `ms-marco-MiniLM-L-6-v2` (reranker, query-length-guarded)
-**Guard:** reranking skipped when query word count > 8 (guard fires for SciFact and ArguAna)
+**Guard:** reranking skipped when query word count > 8
+
+Three reranker implementation fixes applied vs the 2026-06-11 run:
+- Removed `[:512]` character truncation (was ~100 tokens); tokenizer now handles truncation at 512 tokens
+- Title prepended to passage (same signal used by the dense retriever)
+- Snippet cap raised from 800 to 2,000 characters (~400 tokens)
 
 ### BEIR/SciFact (seed 42, 100 queries)
 
-`mean_query_words=12.0`, `rerank_skipped=75/100`.
+`mean_query_words=12.0`, `guard_fires=75/100`
 
 | Method | Recall@5 | Recall@10 | nDCG@10 | Δ nDCG@10 |
 |---|---|---|---|---|
-| Dense (BGE) | 0.777 | 0.828 | **0.749** | — |
-| + Cross-encoder, no guard | 0.700 | 0.795 | 0.647 | −0.101 |
-| + Cross-encoder, guard > 8 words | 0.737 | 0.798 | **0.696** | **−0.052** |
+| Dense (BGE-small) | 0.777 | 0.828 | **0.749** | — |
+| + ms-marco-MiniLM (guard > 8 words) | 0.797 | 0.848 | **0.746** | **-0.002** |
 
-The guard skips 75 % of queries (> 8 words) and halves the regression.
-25 shorter claims (≤ 8 words) are still reranked and remain somewhat
-out-of-distribution for the MS MARCO cross-encoder.
+75 % of queries exceed 8 words and are not reranked. The −0.002 delta on the
+remaining 25 shorter claims is within noise — scientific claims are still
+partially out-of-distribution for the MS MARCO encoder.
 
 ### BEIR/NFCorpus (seed 42, 100 queries)
 
-`mean_query_words=3.2`, `rerank_skipped=4/100`.
+`mean_query_words=3.2`, `guard_fires=4/100`
 
 | Method | Recall@5 | Recall@10 | nDCG@10 | Δ nDCG@10 |
 |---|---|---|---|---|
-| Dense (BGE) | 0.130 | 0.165 | **0.341** | — |
-| + Cross-encoder, guard > 8 words | 0.122 | 0.160 | **0.324** | **−0.016** |
+| Dense (BGE-small) | 0.130 | 0.165 | **0.341** | — |
+| + ms-marco-MiniLM (guard > 8 words) | 0.139 | 0.169 | **0.356** | **+0.015** |
 
-Short keyword queries (avg 3.2 words) are mostly within the MS MARCO
-cross-encoder's training distribution, so the guard fires rarely (4/100).
-The remaining −0.016 delta is domain mismatch: the encoder was trained on
-web QA, not biomedical literature.
+Short keyword queries (avg 3.2 words) sit squarely in the MS MARCO training
+distribution. The implementation fixes (title prepend + full token budget)
+flipped this from −0.016 (old run) to +0.015.
 
 ### BEIR/ArguAna (seed 42, 100 queries)
 
-`mean_query_words=194.9`, `rerank_skipped=100/100`.
+`mean_query_words=194.9`, `guard_fires=100/100`
 
 | Method | Recall@5 | Recall@10 | nDCG@10 | Δ nDCG@10 |
 |---|---|---|---|---|
-| Dense (BGE) | 0.650 | 0.760 | **0.391** | — |
-| + Cross-encoder, guard > 8 words | 0.650 | 0.760 | **0.391** | **+0.000** |
+| Dense (BGE-small) | 0.650 | 0.760 | **0.391** | — |
+| + ms-marco-MiniLM (guard > 8 words) | 0.650 | 0.760 | **0.391** | **+0.000** |
 
-All 100 ArguAna queries exceed 8 words (avg ~195 words), so the guard fires
-universally and the reranker is bypassed entirely — identical scores.
+All 100 queries are full argument paragraphs (avg 195 words); the guard fires
+universally and the reranker is bypassed entirely.
 
 ### BEIR summary (3 datasets, seed 42, 100 queries each)
 
 | Dataset | Corpus | Dense nDCG@10 | Reranked nDCG@10 | Δ nDCG@10 | Guard fires |
 |---|---|---|---|---|---|
-| SciFact | 5,183 docs | 0.749 | 0.696 | −0.052 | 75 % |
-| NFCorpus | 3,633 docs | 0.341 | 0.324 | −0.016 | 4 % |
+| SciFact | 5,183 docs | 0.749 | 0.746 | -0.002 | 75 % |
+| NFCorpus | 3,633 docs | 0.341 | 0.356 | **+0.015** | 4 % |
 | ArguAna | 8,674 docs | 0.391 | 0.391 | +0.000 | 100 % |
 
 ---
@@ -169,8 +179,7 @@ universally and the reranker is bypassed entirely — identical scores.
 
 - [x] Re-run 24-task smoke benchmark after model rate limit resets — **done**
       (Run 2: mean_answer_score 0.197 → 0.225; ALCE/ASQA +167%).
-- [x] Extend BEIR run with `nfcorpus` and `arguana` — **script done** (commit `c206bb0`);
-      results pending the current background run.
+- [x] Extend BEIR run with `nfcorpus` and `arguana` — **done** (2026-06-13).
 - [x] Fix ToolMessage JSON truncation that dropped all source metadata — **done** (commit `69f9d36`).
 - [ ] Re-run 24-task smoke benchmark with all three fixes applied to measure grounded_rate > 0.
 - [x] Pre-bake session_id into retriever tool so LLM cannot hallucinate it — **done** (this change).

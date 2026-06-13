@@ -89,7 +89,14 @@ def rerank(
         return chunks[:top_k] if top_k else chunks
 
     # Build (query, passage) pairs for the cross-encoder.
-    pairs = [(query, c.get("snippet", "")[:512]) for c in chunks]
+    # Prepend title (same signal the dense retriever uses) and let the
+    # tokenizer handle truncation at max_length tokens — not [:512] chars
+    # which was only ~100 tokens, starving the model of context.
+    passages = [
+        f"{c.get('title', '')}\n{c.get('snippet', '')}".strip()
+        for c in chunks
+    ]
+    pairs = list(zip([query] * len(chunks), passages))
 
     try:
         scores: list[float] = model.predict(pairs).tolist()
