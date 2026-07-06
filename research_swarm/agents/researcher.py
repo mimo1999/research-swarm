@@ -87,7 +87,7 @@ def _synthesis_prompt(sub_question: str) -> str:
     )
 
 
-def _serialize_tool_result(result: Any, max_chars: int = 8000) -> str:
+def _serialize_tool_result(result: Any, max_chars: int = 4000) -> str:
     """Serialize a tool result to a JSON string safe for inclusion in a ToolMessage.
 
     A naive ``json.dumps(result)[:max_chars]`` truncation can produce invalid JSON
@@ -100,7 +100,7 @@ def _serialize_tool_result(result: Any, max_chars: int = 8000) -> str:
         trimmed = []
         for item in result:
             if isinstance(item, dict) and "snippet" in item and isinstance(item["snippet"], str):
-                item = {**item, "snippet": item["snippet"][:600]}
+                item = {**item, "snippet": item["snippet"][:300]}
             trimmed.append(item)
         result = trimmed
     serialized = json.dumps(result, default=str)
@@ -253,8 +253,13 @@ async def run_researcher(
         sources = _extract_sources_from_messages(messages)
 
         # Synthesise a finding from the gathered evidence
+        sources_text = "\n".join(
+            f"Source {i+1}: {s.title} ({s.url})\n{s.snippet[:300]}"
+            for i, s in enumerate(sources)
+        )
         synthesis_prompt = _synthesis_prompt(sub_q)
-        synthesis_messages = messages + [HumanMessage(content=synthesis_prompt)]
+        synthesis_content = f"Evidence gathered:\n{sources_text}\n\n{synthesis_prompt}"
+        synthesis_messages = [system_msg, HumanMessage(content=synthesis_content)]
 
         try:
             synthesis: FindingSynthesis = await synthesis_llm.ainvoke(synthesis_messages)

@@ -5,7 +5,7 @@ import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from pydantic import BaseModel
+    pass
 
 
 def _field(obj, name: str, default=None):
