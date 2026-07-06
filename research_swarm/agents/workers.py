@@ -159,7 +159,13 @@ async def run_worker(
     sources = _extract_sources_from_messages(messages)
     logger.info("Worker[%s] extracted %d sources", role.value, len(sources))
 
-    synthesis_messages = messages + [HumanMessage(content=_synthesis_prompt(sub_question))]
+    sources_text = "\n".join(
+        f"Source {i+1}: {s.title} ({s.url})\n{s.snippet[:300]}"
+        for i, s in enumerate(sources)
+    )
+    synthesis_prompt = _synthesis_prompt(sub_question)
+    synthesis_content = f"Evidence gathered:\n{sources_text}\n\n{synthesis_prompt}"
+    synthesis_messages = [system_msg, HumanMessage(content=synthesis_content)]
     try:
         synthesis: FindingSynthesis = await synthesis_llm.ainvoke(synthesis_messages)
     except Exception as exc:
