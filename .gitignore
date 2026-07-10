@@ -97,3 +97,8 @@ $RECYCLE.BIN/
 *.orig
 docs/last_session.txt
 docs/*.pdf
+
+# Local debug scratch (never commit)
+_e2e_debug.py
+err.txt
+out.txt

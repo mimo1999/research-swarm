@@ -86,6 +86,39 @@ def _check_budget(state: AgentState, node_name: str) -> dict[str, Any] | None:
         }
 
 
+def _research_targets(state: AgentState) -> list[str]:
+    """Return the sub-questions needing (re-)research this round.
+
+    Round 0: every sub-question in the plan.  Later rounds: only sub-questions
+    whose latest finding is missing, weak, or refuted.  Shared by dispatch_node
+    and route_from_dispatch so their views of the round can never drift apart.
+    """
+    from research_swarm.agents._utils import _latest_verdicts
+
+    plan = state.get("plan")
+    if not plan:
+        return []
+
+    findings  = state.get("findings") or []
+    critiques = state.get("critiques") or []
+
+    if state.get("research_rounds", 0) == 0:
+        return list(plan.sub_questions)
+
+    latest_verdicts = _latest_verdicts(critiques)
+    weak_or_refuted = {
+        fid for fid, v in latest_verdicts.items() if v in {"weak", "refuted"}
+    }
+    answered_sqs: set[str] = set()
+    for f in findings:
+        sq  = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
+        fid = f.id if hasattr(f, "id") else f.get("id", "")
+        if fid not in weak_or_refuted:
+            answered_sqs.add(sq.strip().lower())
+
+    return [sq for sq in plan.sub_questions if sq.strip().lower() not in answered_sqs]
+
+
 def _depth_str(state: AgentState) -> str:
     query = state.get("query")
     if not query:
@@ -148,11 +181,8 @@ async def dispatch_node(state: AgentState) -> dict[str, Any]:
     which returns a list of ``Send`` objects — one per target sub-question.
     This node just updates bookkeeping fields.
     """
-    from research_swarm.agents._utils import _latest_verdicts
-
-    findings  = state.get("findings") or []
-    critiques = state.get("critiques") or []
-    plan      = state.get("plan")
+    findings = state.get("findings") or []
+    plan     = state.get("plan")
 
     if not plan:
         logger.error("dispatch_node called with no plan — skipping.")
@@ -161,33 +191,12 @@ async def dispatch_node(state: AgentState) -> dict[str, Any]:
             "messages": [AIMessage(content="[Dispatch] No plan found; forcing writer.")],
         }
 
-    # Determine which sub-questions need (re-)research.
-    latest_verdicts  = _latest_verdicts(critiques)
-    finding_ids      = {f.id if hasattr(f, "id") else f.get("id", "") for f in findings}
-    weak_or_refuted  = {
-        fid for fid, v in latest_verdicts.items() if v in {"weak", "refuted"}
-    }
-    answered_sqs: set[str] = set()
-    for f in findings:
-        sq  = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
-        fid = f.id if hasattr(f, "id") else f.get("id", "")
-        if fid not in weak_or_refuted:
-            answered_sqs.add(sq.strip().lower())
-
-    # On first round: research all sub-questions.
-    # On subsequent rounds: only those that are unanswered or need re-research.
+    finding_ids = {f.id if hasattr(f, "id") else f.get("id", "") for f in findings}
     research_rounds = state.get("research_rounds", 0)
-    if research_rounds == 0:
-        targets = list(plan.sub_questions)
-    else:
-        targets = [
-            sq for sq in plan.sub_questions
-            if sq.strip().lower() not in answered_sqs
-        ]
-        if not targets:
-            # Nothing left to re-research — let collect handle the transition
-            logger.info("Dispatch: all sub-questions answered; signalling collect.")
-            targets = []
+    targets = _research_targets(state)
+    if research_rounds > 0 and not targets:
+        # Nothing left to re-research — let collect handle the transition
+        logger.info("Dispatch: all sub-questions answered; signalling collect.")
 
     logger.info(
         "Dispatch round %d: %d target(s) from %d sub-question(s).",
@@ -213,36 +222,13 @@ def route_from_dispatch(state: AgentState):
     If there are no targets (all sub-questions answered), send a single
     no-op worker that immediately routes to collect (which will stop the loop).
     """
-    from research_swarm.agents._utils import _latest_verdicts
-
-    plan      = state.get("plan")
-    findings  = state.get("findings") or []
-    critiques = state.get("critiques") or []
+    plan     = state.get("plan")
+    findings = state.get("findings") or []
 
     if not plan:
         return [Send("collect_node", {"active_sub_question": None})]
 
-    latest_verdicts = _latest_verdicts(critiques)
-    weak_or_refuted = {
-        fid for fid, v in latest_verdicts.items() if v in {"weak", "refuted"}
-    }
-
-    answered_sqs: set[str] = set()
-    for f in findings:
-        sq  = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
-        fid = f.id if hasattr(f, "id") else f.get("id", "")
-        if fid not in weak_or_refuted:
-            answered_sqs.add(sq.strip().lower())
-
-    research_rounds = state.get("research_rounds", 0)
-    if research_rounds == 0:
-        targets = list(plan.sub_questions)
-    else:
-        targets = [
-            sq for sq in plan.sub_questions
-            if sq.strip().lower() not in answered_sqs
-        ]
-
+    targets = _research_targets(state)
     if not targets:
         # Nothing to research — bounce through a no-op worker to collect
         return [Send("collect_node", {"active_sub_question": None,

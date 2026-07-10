@@ -1,6 +1,7 @@
 """Researcher agent -- tool-calling ReAct loop that produces Finding objects."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -138,7 +139,9 @@ async def _run_tool_loop(
                 result = f"[Unknown tool: {tool_name}]"
             else:
                 try:
-                    result = tool_fn.invoke(tool_args)
+                    # Tools are sync (httpx/Tavily) — run in a thread so parallel
+                    # worker nodes don't serialize on the event loop.
+                    result = await asyncio.to_thread(tool_fn.invoke, tool_args)
                 except Exception as exc:
                     result = f"[Tool error: {exc}]"
 

@@ -43,6 +43,7 @@ st.set_page_config(
 from research_swarm.config import settings
 from research_swarm.graph.builder import build_graph, get_thread_config, make_async_checkpointer
 from research_swarm.rag.indexes import get_embed_model
+from research_swarm.runtime.budget import clear_budget
 from research_swarm.rag.ingestion import IngestionPipeline
 from research_swarm.schemas import ResearchQuery
 from research_swarm.ui.report_view import render_report
@@ -114,6 +115,11 @@ def _init_state() -> None:
 
 
 def _reset_run() -> None:
+    # Release the previous run's budget guard — session IDs are per-run UUIDs,
+    # so stale guards would otherwise accumulate for the life of the server.
+    old_session = st.session_state.get("session_id")
+    if old_session:
+        clear_budget(old_session)
     st.session_state.update(
         session_id=str(uuid.uuid4()),
         running=False,

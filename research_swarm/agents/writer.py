@@ -27,6 +27,8 @@ Guidelines:
   - Be accurate: only include claims supported by the evidence.
   - Acknowledge limitations honestly.
   - Incorporate any human feedback provided below.
+  - Leave the `references` array EMPTY ([]) — it is populated programmatically
+    from the collected sources; do not re-list them.
 
 Audience: {audience}
 Human feedback: {human_feedback}
@@ -146,9 +148,9 @@ async def run_writer(
 
     try:
         report: FinalReport = await structured_llm.ainvoke([system_msg, user_msg])
-        # Ensure references list is populated
-        if not report.references:
-            report = report.model_copy(update={"references": references})
+        # References are always set programmatically — the LLM is instructed to
+        # leave them empty (saves output tokens and avoids hallucinated URLs).
+        report = report.model_copy(update={"references": references})
     except Exception as exc:
         logger.error("Writer structured output failed: %s", exc)
         # Fallback: build a minimal report manually
@@ -226,8 +228,7 @@ async def _faithfulness_rewrite(
         rewritten: FinalReport = await structured_llm.ainvoke(
             [system_msg, original_user_msg, rewrite_msg]
         )
-        if not rewritten.references:
-            rewritten = rewritten.model_copy(update={"references": references})
+        rewritten = rewritten.model_copy(update={"references": references})
         logger.info("Rewrite faithfulness: %.3f", score_report(rewritten, references))
         return rewritten
     except Exception as exc:

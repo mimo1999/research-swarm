@@ -2,10 +2,6 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pydantic import BaseModel
 
 
 def _field(obj, name: str, default=None):
@@ -20,6 +16,23 @@ def _field(obj, name: str, default=None):
     return getattr(obj, name, default)
 
 
+def _strip_schema_titles(node):
+    """Drop Pydantic's auto-generated ``"title": "<str>"`` metadata from a JSON schema.
+
+    Property names (dict-valued keys under ``properties``) are untouched — only
+    string-valued ``title`` entries, which are pure metadata, are removed.
+    """
+    if isinstance(node, dict):
+        return {
+            k: _strip_schema_titles(v)
+            for k, v in node.items()
+            if not (k == "title" and isinstance(v, str))
+        }
+    if isinstance(node, list):
+        return [_strip_schema_titles(v) for v in node]
+    return node
+
+
 def schema_output_instruction(schema_class: type) -> str:
     """Return a system-prompt suffix that injects the full Pydantic schema.
 
@@ -31,8 +44,12 @@ def schema_output_instruction(schema_class: type) -> str:
     Unlike the old ``json_output_instruction`` (hand-written example), this
     generates the instruction from ``model_json_schema()`` so it stays in sync
     with field names, types, descriptions, and constraints automatically.
+
+    The schema is serialised compactly (no indentation, no auto-generated
+    ``title`` metadata) — this suffix rides on every LLM call, so its size
+    directly multiplies prompt-token cost across the whole session.
     """
-    schema = schema_class.model_json_schema()
+    schema = _strip_schema_titles(schema_class.model_json_schema())
     return (
         "\n\n"
         "OUTPUT FORMAT — CRITICAL:\n"
@@ -40,7 +57,7 @@ def schema_output_instruction(schema_class: type) -> str:
         "Do NOT use markdown, code fences (```), bullet points, or any prose.\n"
         "Do NOT include any text before or after the JSON.\n"
         "Your response must conform to this JSON Schema:\n"
-        f"{json.dumps(schema, indent=2)}"
+        f"{json.dumps(schema, separators=(',', ':'))}"
     )
 
 
