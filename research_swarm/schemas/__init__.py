@@ -1,5 +1,6 @@
 from .critique import Critique, CritiqueVerdict
 from .finding import Finding
+from .judge import JudgeVerdict, LLMJudgeResult
 from .plan import ResearchPlan
 from .query import ResearchDepth, ResearchQuery
 from .report import FinalReport, ReportQualityScore, ReportSection
@@ -19,6 +20,8 @@ __all__ = [
     "ReportSection",
     "FinalReport",
     "ReportQualityScore",
+    "JudgeVerdict",
+    "LLMJudgeResult",
     "AgentState",
     "AgentName",
     "WorkerRole",
