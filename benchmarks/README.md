@@ -126,6 +126,39 @@ Fixes applied: grounding bug (Send payload), schema-in-prompt for all structured
 
 ---
 
+## Results — reranker model comparison (2026-07-21/22, seed 42)
+
+**Production reranker (`research_swarm/rag/reranker.py`) switched from
+`cross-encoder/ms-marco-MiniLM-L-6-v2` (22 MB) to `BAAI/bge-reranker-base`
+(280 MB).** `bge-reranker-v2-m3` (the literal "v2" release, 2.2 GB) was
+evaluated first but consistently failed to load on this machine's available
+RAM (~1.9 GB free of 16 GB total) — the process died silently with no
+Python exception. `bge-reranker-base` is the v1-generation, smaller BGE
+reranker and loaded/ran without issue.
+
+`benchmarks/run_beir_reranker_compare.py` now scores three reranker methods
+(dense, ms-marco-MiniLM, bge-reranker-base) in one pass per dataset, same
+100-query seed-42 sample and query-length guard (>8 words skips reranking)
+as the 2026-06-13 run:
+
+| Dataset | Dense nDCG@10 | ms-marco nDCG@10 | Δ | bge-base nDCG@10 | Δ | Guard fires |
+|---|---|---|---|---|---|---|
+| SciFact | 0.7485 | 0.7464 | -0.0021 | **0.7552** | **+0.0067** | 75 % |
+| NFCorpus | 0.3131 | **0.3379** | **+0.0248** | 0.3206 | +0.0075 | 4 % |
+| ArguAna | 0.4574 | 0.4574 | +0.0000 | 0.4574 | +0.0000 | 100 % |
+
+Takeaways:
+- `bge-reranker-base` never regresses nDCG@10 versus dense retrieval alone
+  (ms-marco does, on SciFact: -0.0021). It's the more consistent choice.
+- `ms-marco-MiniLM` still wins outright on NFCorpus's short keyword queries
+  (its original training distribution).
+- `bge-reranker-base` is markedly slower on CPU: ~6x the wall-clock of
+  ms-marco-MiniLM for the same pair count (e.g. NFCorpus: 768s vs 128s for
+  1,920 pairs; SciFact: 198s vs 30s for 500 pairs). Worth watching if
+  reranking latency becomes a bottleneck in a live research run.
+
+Results saved under `data/benchmark_results/beir-reranker-compare-*.json`.
+
 ## Results — BEIR retrieval evaluation (2026-06-13, seed 42)
 
 **Models:** `bge-small-en-v1.5` (dense) + `ms-marco-MiniLM-L-6-v2` (reranker, query-length-guarded)

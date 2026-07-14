@@ -46,11 +46,11 @@ Windows: double-click `start.bat` - checks deps, optionally starts Ollama, opens
 # .env - key settings (see .env.example for full list)
 ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY / leave blank for Ollama
 TAVILY_API_KEY=...             # required for web search
-DEFAULT_MODEL_PROVIDER=ollama  # anthropic | openai | ollama
-DEFAULT_MODEL_NAME=gemma4:31b-cloud
-DEFAULT_DEPTH=shallow          # shallow | standard | deep
-MAX_ITERATIONS=1
-MAX_SOURCES=3
+DEFAULT_MODEL_PROVIDER=anthropic  # anthropic | openai | ollama
+DEFAULT_MODEL_NAME=claude-sonnet-4-6
+DEFAULT_DEPTH=standard          # shallow | standard | deep
+MAX_ITERATIONS=10
+MAX_SOURCES=15
 MAX_LLM_CALLS=25               # hard budget per session
 OLLAMA_BASE_URL=http://localhost:11434
 ```
@@ -89,7 +89,7 @@ All settings are overridable from the sidebar at runtime.
 | Feature | Detail |
 |---|---|
 | **Budget guard** | Counts actual LLM calls per session; raises `BudgetExceeded` and forces a graceful writer fallback above `MAX_LLM_CALLS`. |
-| **Cross-encoder reranker** | `ms-marco-MiniLM-L-6-v2` (CPU, 22 MB) reranks RAG chunks by relevance before returning to the researcher. |
+| **Cross-encoder reranker** | `bge-reranker-base` (CPU, 280 MB) reranks RAG chunks by relevance before returning to the researcher. |
 | **Faithfulness check** | BGE embeddings score each report section against its cited snippets; triggers a rewrite if grounding is too low. |
 | **SSRF protection** | URL fetcher validates every hop against a private-IP blocklist; fetched content is sanitised for prompt-injection patterns. |
 | **Schema migration** | `migrate_state()` upgrades v0/v1 checkpoints to the current schema on resume - no manual DB work needed. |
@@ -102,13 +102,13 @@ RAG retrieval evaluated on three [BEIR](https://github.com/beir-cellar/beir) dat
 
 | Dataset | BM25 ¹ | Contriever ¹ | BGE-Large ¹ | **Ours (BGE-small, dense)** | **Ours (+ reranker)** |
 |---|---|---|---|---|---|
-| SciFact | 0.678 | 0.677 | 0.752 | **0.749** | **0.746** |
-| NFCorpus | 0.321 | 0.328 | 0.381 | 0.341 | **0.356** |
+| SciFact | 0.678 | 0.677 | 0.752 | **0.749** | **0.755** |
+| NFCorpus | 0.321 | 0.328 | 0.381 | 0.341 | **0.321** |
 | ArguAna | 0.397 | 0.446 | 0.416 | **0.391** | **0.391** |
 
 ¹ Published baselines from the [BEIR paper](https://arxiv.org/abs/2104.08663) and [Resources for Brewing BEIR](https://arxiv.org/abs/2306.07471). BGE-Large is `bge-large-en-v1.5`; our embedder is the much smaller `bge-small-en-v1.5` (~130 MB vs ~1.3 GB).
 
-The cross-encoder reranker (`ms-marco-MiniLM-L-6-v2`) is guarded: skipped for queries longer than 8 words (most scientific queries) to avoid out-of-distribution degradation. On NFCorpus (short keyword queries, avg 3.2 words) it adds +1.5% nDCG@10. See [`benchmarks/README.md`](benchmarks/README.md) for the full per-dataset breakdown.
+The cross-encoder reranker (`bge-reranker-base`, swapped in from `ms-marco-MiniLM-L-6-v2`) is guarded: skipped for queries longer than 8 words (most scientific queries) to avoid out-of-distribution degradation. It never regresses nDCG@10 versus dense retrieval alone across the three BEIR sets, but is ~6x slower on CPU than the smaller ms-marco model it replaced and loses to it on NFCorpus's short keyword queries. See [`benchmarks/README.md`](benchmarks/README.md) for the full per-dataset breakdown and the reasoning behind the model choice.
 
 ---
 

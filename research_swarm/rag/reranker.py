@@ -1,8 +1,9 @@
 """Cross-encoder reranker for RAG retrieval.
 
-Uses ``cross-encoder/ms-marco-MiniLM-L-6-v2`` — a 22 MB model that runs on
-CPU and provides substantially better relevance ordering than raw cosine
-similarity alone.  The model is loaded once and cached via ``lru_cache``.
+Uses ``BAAI/bge-reranker-base`` — a 280 MB multilingual cross-encoder that
+runs on CPU and provides substantially better relevance ordering than raw
+cosine similarity alone.  The model is loaded once and cached via
+``lru_cache``.
 
 Public API::
 
@@ -35,8 +36,8 @@ def _get_cross_encoder():
     """
     try:
         from sentence_transformers import CrossEncoder
-        logger.info("Loading cross-encoder model ms-marco-MiniLM-L-6-v2 ...")
-        model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", max_length=512)
+        logger.info("Loading cross-encoder model bge-reranker-base ...")
+        model = CrossEncoder("BAAI/bge-reranker-base", max_length=512)
         logger.info("Cross-encoder loaded.")
         return model
     except Exception as exc:
@@ -47,11 +48,12 @@ def _get_cross_encoder():
 _RERANK_MAX_WORDS = 8
 """Skip reranking when the query exceeds this many words.
 
-``ms-marco-MiniLM-L-6-v2`` was trained on short MS MARCO keyword queries
-(typically 2–5 words).  Long, sentence-style queries — such as scientific
-claims or natural-language questions — are out-of-distribution and the
-cross-encoder consistently mis-scores them, reducing nDCG versus dense
-retrieval alone.  Returning the dense-ranked list unchanged is safer.
+Short, sentence-style queries dominate the retriever's sub-question
+workload; long natural-language questions have historically been
+out-of-distribution for MS-MARCO-trained rerankers, reducing nDCG versus
+dense retrieval alone.  Returning the dense-ranked list unchanged is safer.
+See ``benchmarks/run_beir_reranker_compare.py`` for the guard's measured
+effect on ``bge-reranker-base``.
 """
 
 
