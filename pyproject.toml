@@ -23,6 +23,11 @@ dependencies = [
     "pydantic-settings (>=2.0.0)",
     # Streamlit UI
     "streamlit>=1.37.0",
+    # FastAPI backend (React frontend)
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "sse-starlette>=2.1.0",
+    "python-multipart>=0.0.9",
     # Tools
     "tavily-python>=0.3.0",
     "arxiv>=2.1.0",
