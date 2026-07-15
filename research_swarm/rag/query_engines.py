@@ -29,6 +29,7 @@ from llama_index.llms.ollama import Ollama
 
 from research_swarm.config import settings
 from research_swarm.rag.indexes import build_summary_index, load_vector_index
+from research_swarm.runtime.session_ctx import resolve_ollama_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -49,44 +50,43 @@ except Exception:
 # ---------------------------------------------------------------------------
 
 _OLLAMA_PROBE_TTL = 60.0  # seconds between live HTTP checks
-_ollama_probe_cache: tuple[bool, float] | None = None
+# Keyed by base URL: sessions may point at different daemons, and a cached
+# "unreachable" for one must not answer for another.
+_ollama_probe_cache: dict[str, tuple[bool, float]] = {}
 
 
-def probe_ollama() -> bool:
-    """Return True if the local Ollama HTTP endpoint is reachable.
+def probe_ollama(base_url: str | None = None) -> bool:
+    """Return True if the session's Ollama HTTP endpoint is reachable.
 
-    Results are cached for ``_OLLAMA_PROBE_TTL`` seconds so a down server
-    does not block every researcher tool-call with a 3-second timeout.
+    Results are cached per base URL for ``_OLLAMA_PROBE_TTL`` seconds so a down
+    server does not block every researcher tool-call with a 3-second timeout.
     """
-    global _ollama_probe_cache
+    base_url = base_url or resolve_ollama_base_url()
     now = time.monotonic()
-    if _ollama_probe_cache is not None:
-        cached_result, cached_at = _ollama_probe_cache
-        if now - cached_at < _OLLAMA_PROBE_TTL:
-            return cached_result
+    cached = _ollama_probe_cache.get(base_url)
+    if cached is not None and now - cached[1] < _OLLAMA_PROBE_TTL:
+        return cached[0]
     try:
-        resp = httpx.get(
-            f"{settings.ollama_base_url}/api/tags",
-            timeout=3.0,
-        )
+        resp = httpx.get(f"{base_url}/api/tags", timeout=3.0)
         result = resp.status_code == 200
     except Exception:
         result = False
-    _ollama_probe_cache = (result, now)
+    _ollama_probe_cache[base_url] = (result, now)
     return result
 
 
 def get_local_llm() -> BaseLLM | None:
     """Return an Ollama LLM instance if Ollama is running, else None."""
-    if not probe_ollama():
+    base_url = resolve_ollama_base_url()
+    if not probe_ollama(base_url):
         logger.warning(
             "Ollama not reachable at %s -- routing and decomposition disabled.",
-            settings.ollama_base_url,
+            base_url,
         )
         return None
     return Ollama(
         model=settings.ollama_model,
-        base_url=settings.ollama_base_url,
+        base_url=base_url,
         request_timeout=settings.ollama_timeout,
     )
 
