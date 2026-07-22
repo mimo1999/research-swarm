@@ -157,6 +157,40 @@ Takeaways:
   1,920 pairs; SciFact: 198s vs 30s for 500 pairs). Worth watching if
   reranking latency becomes a bottleneck in a live research run.
 
+### mxbai-rerank-xsmall-v1 (2026-07-22, seed 42) — quality winner, latency disqualifies it
+
+A fourth method, `mixedbread-ai/mxbai-rerank-xsmall-v1` (~70M params, ~140 MB
+— smaller than `bge-reranker-base` and even most of the 2024-generation
+rerankers), was added to `RERANKER_MODELS` in the same script to check
+whether a newer, lighter model than `bge-reranker-base` could match or beat
+it. Same 100-query seed-42 samples:
+
+| Dataset | Dense | ms-marco Δ | bge-base Δ | mxbai-xsmall Δ | Guard fires |
+|---|---|---|---|---|---|---|
+| SciFact | 0.7485 | -0.0021 | +0.0067 | **+0.0095** | 75 % |
+| NFCorpus | 0.3131 | +0.0248 | +0.0075 | **+0.0263** | 4 % |
+| ArguAna | 0.4574 | +0.0000 | +0.0000 | +0.0000 | 100 % |
+
+`mxbai-rerank-xsmall-v1` produced the best nDCG@10 on every dataset it was
+exercised on — but at a wall-clock cost that rules it out for this CPU-only
+pipeline:
+
+| Pairs scored | ms-marco | bge-base | mxbai-xsmall |
+|---|---|---|---|
+| 500 (SciFact) | 26 s | 199 s | 1,970 s (~76x ms-marco, ~10x bge-base) |
+| 1,920 (NFCorpus) | 121 s | 770 s | 7,581 s (~63x ms-marco, ~10x bge-base) |
+
+Despite having roughly a quarter of `bge-reranker-base`'s parameter count,
+`mxbai-rerank-xsmall-v1` runs ~10x slower per pair on CPU — parameter count
+is not a reliable proxy for CPU inference cost here; the architecture isn't
+optimized for the same cheap batched sequence-classification path the
+BERT-style cross-encoders use. **Production reranker stays on
+`bge-reranker-base`** — mxbai's quality edge doesn't justify a further 10x
+latency hit on top of the 6x already paid moving off ms-marco-MiniLM.
+- ArguAna's 195-word average queries hit the length guard 100% of the time
+  for both models, so neither reranker is ever exercised there — dense
+  retrieval numbers are unchanged by definition.
+
 Results saved under `data/benchmark_results/beir-reranker-compare-*.json`.
 
 ## Results — BEIR retrieval evaluation (2026-06-13, seed 42)

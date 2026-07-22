@@ -1,4 +1,4 @@
-"""Side-by-side BEIR evaluation: dense (BGE-small) vs ms-marco-MiniLM reranker.
+"""Side-by-side BEIR evaluation: dense (BGE-small) vs ms-marco-MiniLM vs bge-reranker-base vs mxbai-rerank-xsmall.
 
 Does NOT modify any production code — results only.
 
@@ -35,6 +35,13 @@ EMB_CACHE_ROOT = Path("data/benchmark_results/emb_cache")
 ALL_DATASETS = ["scifact", "nfcorpus", "arguana"]
 
 _MSMARCO_GUARD = 8  # skip reranking for queries longer than this many words
+
+# (result key, print label, HF model id, CrossEncoder max_length)
+RERANKER_MODELS = [
+    ("msmarco", "ms-marco-MiniLM", "cross-encoder/ms-marco-MiniLM-L-6-v2", 512),
+    ("bge", "bge-reranker-base", "BAAI/bge-reranker-base", 512),
+    ("mxbai", "mxbai-rerank-xsmall", "mixedbread-ai/mxbai-rerank-xsmall-v1", 512),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +137,71 @@ def means(rows: list[dict]) -> dict[str, float]:
 
 
 # ---------------------------------------------------------------------------
+# Cross-encoder pass (shared by ms-marco and bge-reranker-base)
+# ---------------------------------------------------------------------------
+
+def run_cross_encoder_pass(
+    label: str,
+    model_name: str,
+    max_length: int,
+    query_texts: list[str],
+    all_chunks: list[list[dict]],
+    dense_ids_list: list[list[str]],
+    relevant_list: list[set[str]],
+    relevance_list: list[dict[str, int]],
+    guard_words: int,
+) -> tuple[dict[str, float], int]:
+    print(f"\n  --- {label} pass ---", flush=True)
+    from sentence_transformers import CrossEncoder
+    model = CrossEncoder(model_name, max_length=max_length)
+
+    all_pairs: list[tuple[str, str]] = []
+    skip_flags: list[bool] = []
+
+    for q_text, chunks in zip(query_texts, all_chunks):
+        if len(q_text.split()) > guard_words:
+            skip_flags.append(True)
+        else:
+            skip_flags.append(False)
+            for c in chunks:
+                passage = f"{c.get('title', '')}\n{c.get('snippet', '')}".strip()
+                all_pairs.append((q_text, passage))
+
+    all_scores: list[float] = []
+    if all_pairs:
+        print(f"  Scoring {len(all_pairs)} pairs ...", flush=True)
+        t0 = time.perf_counter()
+        all_scores = model.predict(all_pairs).tolist()
+        print(f"  Done in {time.perf_counter()-t0:.1f}s.", flush=True)
+
+    del model
+    gc.collect()
+
+    metrics: list[dict] = []
+    skipped = 0
+    pair_cursor = 0
+
+    for q_idx, (chunks, dense_ids) in enumerate(zip(all_chunks, dense_ids_list)):
+        if skip_flags[q_idx]:
+            reranked_ids = dense_ids[:10]
+            skipped += 1
+        else:
+            n = len(chunks)
+            scores = all_scores[pair_cursor : pair_cursor + n]
+            pair_cursor += n
+            ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
+            reranked_ids = [c["url"].rsplit("/", 1)[-1] for _, c in ranked[:10]]
+
+        metrics.append({
+            "recall@5":  recall_at(reranked_ids, relevant_list[q_idx], 5),
+            "recall@10": recall_at(reranked_ids, relevant_list[q_idx], 10),
+            "ndcg@10":   ndcg_at(reranked_ids, relevance_list[q_idx], 10),
+        })
+
+    return means(metrics), skipped
+
+
+# ---------------------------------------------------------------------------
 # Per-dataset evaluation
 # ---------------------------------------------------------------------------
 
@@ -191,64 +263,28 @@ def evaluate_dataset(name: str, query_count: int, rng: random.Random, use_cache:
         relevance_list.append(relevance)
         relevant_list.append(relevant)
 
-    # Step 3: ms-marco — build all pairs, predict in one batch, unload.
-    print(f"\n  [{name}] --- ms-marco-MiniLM pass ---", flush=True)
-    from sentence_transformers import CrossEncoder
-    msmarco_model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", max_length=512)
-
-    all_pairs: list[tuple[str, str]] = []
-    skip_flags: list[bool] = []
-
-    for q_text, chunks in zip(query_texts, all_chunks):
-        if len(q_text.split()) > _MSMARCO_GUARD:
-            skip_flags.append(True)
-        else:
-            skip_flags.append(False)
-            for c in chunks:
-                passage = f"{c.get('title', '')}\n{c.get('snippet', '')}".strip()
-                all_pairs.append((q_text, passage))
-
-    all_scores: list[float] = []
-    if all_pairs:
-        print(f"  Scoring {len(all_pairs)} pairs ...", flush=True)
-        t0 = time.perf_counter()
-        all_scores = msmarco_model.predict(all_pairs).tolist()
-        print(f"  Done in {time.perf_counter()-t0:.1f}s.", flush=True)
-
-    del msmarco_model
-    gc.collect()
-
-    msmarco_metrics: list[dict] = []
-    msmarco_skipped = 0
-    pair_cursor = 0
-
-    for q_idx, (chunks, dense_ids) in enumerate(zip(all_chunks, dense_ids_list)):
-        if skip_flags[q_idx]:
-            reranked_ids = dense_ids[:10]
-            msmarco_skipped += 1
-        else:
-            n = len(chunks)
-            scores = all_scores[pair_cursor : pair_cursor + n]
-            pair_cursor += n
-            ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
-            reranked_ids = [c["url"].rsplit("/", 1)[-1] for _, c in ranked[:10]]
-
-        msmarco_metrics.append({
-            "recall@5":  recall_at(reranked_ids, relevant_list[q_idx], 5),
-            "recall@10": recall_at(reranked_ids, relevant_list[q_idx], 10),
-            "ndcg@10":   ndcg_at(reranked_ids, relevance_list[q_idx], 10),
-        })
+    # Step 3: each reranker model, built/scored/unloaded in turn.
+    reranker_results: dict[str, dict] = {}
+    for key, label, model_name, max_length in RERANKER_MODELS:
+        means_, skipped = run_cross_encoder_pass(
+            label, model_name, max_length,
+            query_texts, all_chunks, dense_ids_list, relevant_list, relevance_list,
+            guard_words=_MSMARCO_GUARD,
+        )
+        reranker_results[key] = {"means": means_, "guard_fires": skipped}
 
     mean_words = float(np.mean([len(q.split()) for q in query_texts]))
-    return {
-        "dataset":             f"beir/{name}",
-        "queries":             sample_size,
-        "corpus_documents":    len(corpus_rows),
-        "mean_query_words":    round(mean_words, 1),
-        "msmarco_guard_fires": msmarco_skipped,
-        "dense":               means(dense_metrics),
-        "msmarco_reranked":    means(msmarco_metrics),
+    result = {
+        "dataset":          f"beir/{name}",
+        "queries":          sample_size,
+        "corpus_documents": len(corpus_rows),
+        "mean_query_words": round(mean_words, 1),
+        "dense":            means(dense_metrics),
     }
+    for key, _label, _model_name, _max_length in RERANKER_MODELS:
+        result[f"{key}_reranked"] = reranker_results[key]["means"]
+        result[f"{key}_guard_fires"] = reranker_results[key]["guard_fires"]
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -272,13 +308,17 @@ def main(args: argparse.Namespace) -> None:
         result["elapsed_seconds"] = round(time.perf_counter() - t0, 3)
         all_results.append(result)
 
-        d  = result["dense"]
-        ms = result["msmarco_reranked"]
-        print(f"\n  [{name}] mean_query_words={result['mean_query_words']:.1f}  "
-              f"guard fires={result['msmarco_guard_fires']}/{result['queries']}")
+        d = result["dense"]
+        guard_str = "  ".join(
+            f"{label} guard fires={result[f'{key}_guard_fires']}/{result['queries']}"
+            for key, label, _mn, _ml in RERANKER_MODELS
+        )
+        print(f"\n  [{name}] mean_query_words={result['mean_query_words']:.1f}  {guard_str}")
         print(f"  [{name}] {'Method':<28} {'nDCG@10':>8}  {'R@5':>7}  {'R@10':>7}  {'Delta nDCG@10':>13}")
         print(f"  [{name}] {'Dense (BGE-small)':<28} {d['ndcg@10']:>8.4f}  {d['recall@5']:>7.4f}  {d['recall@10']:>7.4f}  {'baseline':>13}")
-        print(f"  [{name}] {'+ ms-marco-MiniLM':<28} {ms['ndcg@10']:>8.4f}  {ms['recall@5']:>7.4f}  {ms['recall@10']:>7.4f}  {ms['ndcg@10']-d['ndcg@10']:>+13.4f}")
+        for key, label, _mn, _ml in RERANKER_MODELS:
+            m = result[f"{key}_reranked"]
+            print(f"  [{name}] {'+ ' + label:<28} {m['ndcg@10']:>8.4f}  {m['recall@5']:>7.4f}  {m['recall@10']:>7.4f}  {m['ndcg@10']-d['ndcg@10']:>+13.4f}")
 
     total_elapsed = time.perf_counter() - total_start
 
@@ -293,12 +333,18 @@ def main(args: argparse.Namespace) -> None:
 
     print("\n" + "=" * 60)
     print("SUMMARY -- nDCG@10")
-    print(f"  {'Dataset':<12}  {'Dense':>7}  {'ms-marco':>8}  {'Delta':>7}")
-    print("  " + "-" * 38)
+    header = f"  {'Dataset':<12}  {'Dense':>7}"
+    for _key, label, _mn, _ml in RERANKER_MODELS:
+        header += f"  {label:>13}  {'Delta':>7}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
     for r in all_results:
-        d  = r["dense"]["ndcg@10"]
-        ms = r["msmarco_reranked"]["ndcg@10"]
-        print(f"  {r['dataset'].split('/')[-1]:<12}  {d:>7.4f}  {ms:>8.4f}  {ms-d:>+7.4f}")
+        d = r["dense"]["ndcg@10"]
+        row = f"  {r['dataset'].split('/')[-1]:<12}  {d:>7.4f}"
+        for key, _label, _mn, _ml in RERANKER_MODELS:
+            m = r[f"{key}_reranked"]["ndcg@10"]
+            row += f"  {m:>13.4f}  {m-d:>+7.4f}"
+        print(row)
     print(f"\nResults saved: {summary_path}")
 
 
