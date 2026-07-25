@@ -133,12 +133,17 @@ class TestFindingsMergeReducer:
 # ---------------------------------------------------------------------------
 
 class TestRoutingEdges:
-    def test_route_from_supervisor_returns_dispatch(self):
+    def test_route_from_supervisor_returns_document_pass(self):
         from research_swarm.graph.edges import route_from_supervisor
-        # After plan creation, supervisor always routes to dispatch_node
+        # After plan creation, supervisor always routes to document_pass_node
+        # (the one-time ingested-document extraction fan-out, which itself
+        # bounces straight through to dispatch_node when there are no
+        # ingested documents -- see route_from_document_pass).
         for na in ("dispatch", "researcher", "critic", "writer", None):
             result = route_from_supervisor(_make_state(next_agent=na))
-            assert result == "dispatch_node", f"Expected dispatch_node, got {result!r} for next_agent={na!r}"
+            assert result == "document_pass_node", (
+                f"Expected document_pass_node, got {result!r} for next_agent={na!r}"
+            )
 
     def test_route_from_supervisor_respects_end(self):
         from langgraph.graph import END
@@ -158,6 +163,19 @@ class TestRoutingEdges:
         from research_swarm.graph.edges import route_from_collect
         # Unset next_agent defaults to critic (stop)
         assert route_from_collect(_make_state(next_agent=None)) == "critic"
+
+    def test_route_from_critic_dispatch(self):
+        from research_swarm.graph.edges import route_from_critic
+        assert route_from_critic(_make_state(next_agent="dispatch")) == "dispatch_node"
+
+    def test_route_from_critic_fact_checker(self):
+        from research_swarm.graph.edges import route_from_critic
+        assert route_from_critic(_make_state(next_agent="fact_checker")) == "fact_checker"
+
+    def test_route_from_critic_default_fact_checker(self):
+        from research_swarm.graph.edges import route_from_critic
+        # Unset next_agent defaults to fact_checker (done)
+        assert route_from_critic(_make_state(next_agent=None)) == "fact_checker"
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +248,30 @@ class TestStopSignal:
             similarity_threshold=0.99,  # very high so it doesn't fire
         )
         assert not stop
+
+
+# ---------------------------------------------------------------------------
+# nodes.py — _get_tiered_state_llm
+# ---------------------------------------------------------------------------
+
+class TestGetTieredStateLlm:
+    """The session's chosen provider must override only the worker (standard) tier."""
+
+    def test_standard_tier_follows_session_provider(self):
+        from research_swarm.graph.nodes import _get_tiered_state_llm
+        state = _make_state(model_provider="anthropic")
+        with patch("research_swarm.graph.nodes.get_tiered_llm") as mock_get_tiered:
+            mock_get_tiered.return_value = MagicMock()
+            _get_tiered_state_llm(state, "standard")
+        mock_get_tiered.assert_called_once_with(tier="standard", provider_override="anthropic")
+
+    def test_other_tiers_ignore_session_provider(self):
+        from research_swarm.graph.nodes import _get_tiered_state_llm
+        state = _make_state(model_provider="anthropic")
+        with patch("research_swarm.graph.nodes.get_tiered_llm") as mock_get_tiered:
+            mock_get_tiered.return_value = MagicMock()
+            _get_tiered_state_llm(state, "thorough")
+        mock_get_tiered.assert_called_once_with(tier="thorough", provider_override=None)
 
 
 # ---------------------------------------------------------------------------
@@ -329,18 +371,216 @@ class TestDispatchNode:
         assert plan.sub_questions[1] in sub_questions
         assert plan.sub_questions[0] not in sub_questions
 
+    def test_route_from_dispatch_excludes_findings_at_rework_cap(self):
+        """A weak/refuted finding that already hit max_rework_attempts must not
+        be re-dispatched again, even though it's still weak/refuted."""
+        from research_swarm.config import settings
+        from research_swarm.graph.nodes import route_from_dispatch
+
+        plan = _make_plan(2)
+        f_weak = _make_finding(plan.sub_questions[0], confidence=0.3)
+        f_capped = _make_finding(plan.sub_questions[1], confidence=0.3)
+        c_weak = _make_critique(f_weak.id, CritiqueVerdict.weak)
+        c_capped = _make_critique(f_capped.id, CritiqueVerdict.weak)
+
+        state = _make_state(
+            plan=plan,
+            findings=[f_weak, f_capped],
+            critiques=[c_weak, c_capped],
+            research_rounds=1,
+            rework_counts={plan.sub_questions[1].strip().lower(): settings.max_rework_attempts},
+        )
+        sends = route_from_dispatch(state)
+
+        sub_questions = [s.arg.get("active_sub_question") for s in sends]
+        assert plan.sub_questions[0] in sub_questions      # still under cap
+        assert plan.sub_questions[1] not in sub_questions  # at cap — excluded
+
+    def test_round_0_skips_sub_questions_document_pass_already_answered(self):
+        """document_pass_node can produce findings before round 0 (one-time
+        full-document extraction). Round-0 web dispatch must not duplicate a
+        sub-question a document already answered -- there are no critiques
+        yet at genuine round 0, so this can't rely on the weak/refuted check
+        later rounds use; it must treat any existing finding as answered."""
+        from research_swarm.graph.nodes import route_from_dispatch
+
+        plan = _make_plan(3)
+        doc_finding = _make_finding(plan.sub_questions[0], confidence=0.8)
+        state = _make_state(plan=plan, findings=[doc_finding], critiques=[], research_rounds=0)
+
+        sends = route_from_dispatch(state)
+
+        sub_questions = [s.arg.get("active_sub_question") for s in sends]
+        assert plan.sub_questions[0] not in sub_questions  # document already answered it
+        assert plan.sub_questions[1] in sub_questions
+        assert plan.sub_questions[2] in sub_questions
+
     def test_route_from_dispatch_no_targets_returns_collect_send(self):
-        """When all sub-questions are answered, route straight to collect_node."""
+        """When all sub-questions are answered, route straight to collect_node.
+
+        The bounce payload must carry research_rounds, pre_dispatch_finding_ids,
+        findings, and critiques -- Send() gives collect_node ONLY this payload,
+        not the full graph state, so omitting any of these makes should_stop
+        see research_rounds=0/pre_ids=[] forever, which produces an infinite
+        dispatch<->collect loop (caught via a real end-to-end run that hit
+        LangGraph's GraphRecursionError).
+        """
         from research_swarm.graph.nodes import route_from_dispatch
 
         plan = _make_plan(1)
         f = _make_finding(plan.sub_questions[0])
         c = _make_critique(f.id, CritiqueVerdict.supported)
-        state = _make_state(plan=plan, findings=[f], critiques=[c], research_rounds=1)
+        state = _make_state(
+            plan=plan, findings=[f], critiques=[c], research_rounds=1,
+            pre_dispatch_finding_ids=[f.id], rework_counts={"x": 1},
+        )
         sends = route_from_dispatch(state)
 
         assert len(sends) == 1
         assert sends[0].node == "collect_node"
+        payload = sends[0].arg
+        assert payload["research_rounds"] == 1
+        assert payload["pre_dispatch_finding_ids"] == [f.id]
+        assert payload["findings"] == [f]
+        assert payload["critiques"] == [c]
+        assert payload["rework_counts"] == {"x": 1}
+
+    def test_route_from_dispatch_no_plan_bounce_carries_state(self):
+        """The no-plan defensive branch must also forward state, not just
+        the no-targets branch."""
+        from research_swarm.graph.nodes import route_from_dispatch
+
+        state = _make_state(plan=None, research_rounds=2)
+        sends = route_from_dispatch(state)
+
+        assert len(sends) == 1
+        assert sends[0].node == "collect_node"
+        assert sends[0].arg["research_rounds"] == 2
+
+
+# ---------------------------------------------------------------------------
+# nodes.py — document_pass_node / route_from_document_pass / document_worker_node
+# ---------------------------------------------------------------------------
+
+class TestRouteFromDocumentPass:
+    def test_no_documents_bounces_straight_to_dispatch(self):
+        from research_swarm.graph.nodes import route_from_document_pass
+
+        plan = _make_plan(2)
+        state = _make_state(plan=plan, ingested_documents=[])
+        sends = route_from_document_pass(state)
+
+        assert len(sends) == 1
+        assert sends[0].node == "dispatch_node"
+
+    def test_no_documents_bounce_carries_state(self):
+        """Send() gives dispatch_node ONLY the payload -- it must carry
+        everything _research_targets/dispatch_node reads, same as the
+        analogous _collect_bounce_payload case in route_from_dispatch."""
+        from research_swarm.graph.nodes import route_from_document_pass
+
+        plan = _make_plan(2)
+        f = _make_finding(plan.sub_questions[0])
+        state = _make_state(
+            plan=plan, findings=[f], research_rounds=0, ingested_documents=[],
+        )
+        sends = route_from_document_pass(state)
+
+        payload = sends[0].arg
+        assert payload["plan"] == plan
+        assert payload["findings"] == [f]
+        assert payload["research_rounds"] == 0
+
+    def test_no_plan_bounces_straight_to_dispatch(self):
+        from research_swarm.graph.nodes import route_from_document_pass
+
+        state = _make_state(plan=None, ingested_documents=[{"url": "x", "text": "y"}])
+        sends = route_from_document_pass(state)
+
+        assert len(sends) == 1
+        assert sends[0].node == "dispatch_node"
+
+    def test_one_send_per_document_when_under_size_threshold(self):
+        from research_swarm.graph.nodes import route_from_document_pass
+
+        plan = _make_plan(2)
+        docs = [
+            {"url": "https://a.com", "title": "A", "text": "short text a", "source_type": "web"},
+            {"url": "https://b.com", "title": "B", "text": "short text b", "source_type": "pdf"},
+        ]
+        state = _make_state(plan=plan, ingested_documents=docs)
+        sends = route_from_document_pass(state)
+
+        assert len(sends) == 2
+        assert all(s.node == "document_worker_node" for s in sends)
+        urls = {s.arg["active_document"]["url"] for s in sends}
+        assert urls == {"https://a.com", "https://b.com"}
+        for s in sends:
+            assert s.arg["sub_questions_snapshot"] == list(plan.sub_questions)
+            assert s.arg["active_doc_part_total"] == 1
+
+    def test_oversized_document_splits_into_multiple_sends(self):
+        from research_swarm.graph.nodes import route_from_document_pass
+
+        plan = _make_plan(1)
+        big_text = "This is a test sentence about a topic. " * 3000  # well over MAX_DOC_CHARS
+        docs = [{"url": "https://big.com", "title": "Big", "text": big_text, "source_type": "pdf"}]
+        state = _make_state(plan=plan, ingested_documents=docs)
+        sends = route_from_document_pass(state)
+
+        assert len(sends) >= 2
+        assert all(s.node == "document_worker_node" for s in sends)
+        assert all(s.arg["active_document"]["url"] == "https://big.com" for s in sends)
+        assert all(s.arg["active_doc_part_total"] == len(sends) for s in sends)
+        part_indices = sorted(s.arg["active_doc_part_index"] for s in sends)
+        assert part_indices == list(range(len(sends)))
+
+
+class TestDocumentPassNode:
+    @pytest.mark.asyncio
+    async def test_logs_document_count(self):
+        from research_swarm.graph.nodes import document_pass_node
+
+        state = _make_state(ingested_documents=[{"url": "a"}, {"url": "b"}])
+        result = await document_pass_node(state)
+        assert "2" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_logs_zero_when_no_documents(self):
+        from research_swarm.graph.nodes import document_pass_node
+
+        result = await document_pass_node(_make_state(ingested_documents=[]))
+        assert "No ingested documents" in result["messages"][0].content
+
+
+class TestDocumentWorkerNode:
+    @pytest.mark.asyncio
+    async def test_calls_run_document_worker_and_returns_findings(self):
+        from research_swarm.graph.nodes import document_worker_node
+
+        f = _make_finding("Sub-question 1")
+        with patch("research_swarm.graph.nodes._get_tiered_state_llm", return_value=_mock_llm()), \
+             patch(
+                 "research_swarm.agents.document_worker.run_document_worker",
+                 new=AsyncMock(return_value=[f]),
+             ):
+            state = _make_state(
+                active_document={"url": "https://a.com", "title": "A"},
+                active_doc_part_text="some text",
+                active_doc_part_index=0,
+                active_doc_part_total=1,
+                sub_questions_snapshot=["Sub-question 1"],
+            )
+            result = await document_worker_node(state)
+
+        assert result["findings"] == [f]
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_document_assigned(self):
+        from research_swarm.graph.nodes import document_worker_node
+
+        result = await document_worker_node(_make_state(active_document=None))
+        assert result.get("findings") is None
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +682,136 @@ class TestCollectNode:
         result = await collect_node(state)
         assert result["research_rounds"] == 2
 
+    @pytest.mark.asyncio
+    async def test_bumps_rework_count_for_findings_reworked_this_round(self):
+        """A weak/refuted sub-question that was just re-dispatched (research_rounds > 0)
+        must have its rework_counts entry incremented by one."""
+        from research_swarm.graph.nodes import collect_node
+
+        plan = _make_plan(1)
+        f_weak = _make_finding(plan.sub_questions[0], confidence=0.3)
+        c_weak = _make_critique(f_weak.id, CritiqueVerdict.weak)
+        state = _make_state(
+            plan=plan,
+            findings=[f_weak],
+            critiques=[c_weak],
+            pre_dispatch_finding_ids=[f_weak.id],
+            research_rounds=1,
+            rework_counts={},
+            query=ResearchQuery(topic="test", depth="standard"),
+        )
+        result = await collect_node(state)
+        assert result["rework_counts"][plan.sub_questions[0].strip().lower()] == 1
+
+    @pytest.mark.asyncio
+    async def test_does_not_bump_rework_count_for_sub_question_with_no_finding_yet(self):
+        """A sub-question with no finding at all (e.g. a worker failure, or
+        the mandatory round-0->round-1 loop that always fires before critic
+        ever runs) is not the same as one the critic rejected -- it must not
+        consume rework_counts budget just because _research_targets() still
+        lists it as a target."""
+        from research_swarm.graph.nodes import collect_node
+
+        plan = _make_plan(2)
+        # Only sub_questions[0] has a finding; sub_questions[1] has none --
+        # e.g. its worker failed. No critiques exist yet either.
+        f = _make_finding(plan.sub_questions[0], confidence=0.9)
+        state = _make_state(
+            plan=plan,
+            findings=[f],
+            critiques=[],
+            pre_dispatch_finding_ids=[f.id],
+            research_rounds=1,
+            rework_counts={},
+            query=ResearchQuery(topic="test", depth="standard"),
+        )
+        result = await collect_node(state)
+        assert result["rework_counts"] == {}
+
+    @pytest.mark.asyncio
+    async def test_does_not_bump_rework_count_on_round_zero(self):
+        """The initial dispatch round is not a rework attempt for anything."""
+        from research_swarm.graph.nodes import collect_node
+
+        plan = _make_plan(1)
+        f = _make_finding(plan.sub_questions[0], confidence=0.3)
+        state = _make_state(
+            plan=plan,
+            findings=[f],
+            pre_dispatch_finding_ids=[],
+            research_rounds=0,
+            query=ResearchQuery(topic="test", depth="standard"),
+        )
+        result = await collect_node(state)
+        assert result["rework_counts"] == {}
+
+
+class TestCollectNodeIngestsEvidence:
+    """collect_node persists each round's evidence into the session RAG index.
+
+    Runs once per round, after all Send-dispatched worker_node tasks for that
+    round have already merged -- so this is always a single sequential call,
+    never concurrent writers. See _ingest_round_evidence in graph/nodes.py.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ingests_evidence_when_present(self):
+        from research_swarm.graph.nodes import collect_node
+        from research_swarm.schemas import Source
+
+        f = Finding(
+            claim="c", sub_question="q1", confidence=0.7,
+            evidence=[Source(url="https://example.com", snippet="Some evidence text.")],
+        )
+        state = _make_state(findings=[f], research_rounds=0, pre_dispatch_finding_ids=[])
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.ingest_new_source_dicts.return_value = 1
+
+        with patch(
+            "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+        ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            result = await collect_node(state)
+
+        mock_pipeline.ingest_new_source_dicts.assert_called_once()
+        (evidence_arg, _embed_arg), _ = mock_pipeline.ingest_new_source_dicts.call_args
+        assert len(evidence_arg) == 1
+        assert evidence_arg[0]["url"] == "https://example.com"
+        assert evidence_arg[0]["snippet"] == "Some evidence text."
+        assert "next_agent" in result
+
+    @pytest.mark.asyncio
+    async def test_skips_ingestion_when_no_evidence(self):
+        """_make_finding() attaches no evidence -- ingestion must never even open Chroma."""
+        from research_swarm.graph.nodes import collect_node
+
+        f = _make_finding("q1")
+        state = _make_state(findings=[f], research_rounds=0, pre_dispatch_finding_ids=[])
+
+        with patch("research_swarm.rag.ingestion.IngestionPipeline") as mock_cls:
+            await collect_node(state)
+
+        mock_cls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_ingestion_failure_does_not_break_routing(self):
+        """A broken embedding model / disk issue must never block stop/rework routing."""
+        from research_swarm.graph.nodes import collect_node
+        from research_swarm.schemas import Source
+
+        f = Finding(
+            claim="c", sub_question="q1", confidence=0.7,
+            evidence=[Source(url="https://example.com", snippet="text")],
+        )
+        state = _make_state(findings=[f], research_rounds=0, pre_dispatch_finding_ids=[])
+
+        with patch(
+            "research_swarm.rag.ingestion.IngestionPipeline", side_effect=Exception("boom"),
+        ):
+            result = await collect_node(state)
+
+        assert "next_agent" in result
+
 
 # ---------------------------------------------------------------------------
 # nodes.py — critic_node / fact_checker_node / writer_node
@@ -457,6 +827,81 @@ class TestCriticNode:
             from research_swarm.graph.nodes import critic_node
             result = await critic_node(_make_state(findings=[f]))
         assert result["critiques"] == [c]
+        assert result["next_agent"] == "fact_checker"  # no plan -> nothing to rework
+
+    @pytest.mark.asyncio
+    async def test_routes_to_dispatch_when_finding_weak_and_under_cap(self):
+        """A newly-weak finding under the rework cap must loop back to dispatch_node."""
+        from research_swarm.graph.nodes import critic_node
+
+        plan = _make_plan(1)
+        f = _make_finding(plan.sub_questions[0], confidence=0.3)
+        new_critique = _make_critique(f.id, CritiqueVerdict.weak)
+        state = _make_state(
+            plan=plan, findings=[f], critiques=[], research_rounds=1,
+            query=ResearchQuery(topic="test", depth="deep"),  # generous round budget
+        )
+        with patch("research_swarm.graph.nodes._get_tiered_state_llm", return_value=_mock_llm()), \
+             patch("research_swarm.graph.nodes.run_critic", new=AsyncMock(return_value=[new_critique])):
+            result = await critic_node(state)
+        assert result["next_agent"] == "dispatch"
+
+    @pytest.mark.asyncio
+    async def test_routes_to_fact_checker_when_rework_cap_reached(self):
+        """A finding that's still weak but already at max_rework_attempts must
+        proceed to fact_checker instead of looping forever."""
+        from research_swarm.config import settings
+        from research_swarm.graph.nodes import critic_node
+
+        plan = _make_plan(1)
+        f = _make_finding(plan.sub_questions[0], confidence=0.3)
+        new_critique = _make_critique(f.id, CritiqueVerdict.weak)
+        state = _make_state(
+            plan=plan, findings=[f], critiques=[], research_rounds=1,
+            rework_counts={plan.sub_questions[0].strip().lower(): settings.max_rework_attempts},
+            query=ResearchQuery(topic="test", depth="deep"),
+        )
+        with patch("research_swarm.graph.nodes._get_tiered_state_llm", return_value=_mock_llm()), \
+             patch("research_swarm.graph.nodes.run_critic", new=AsyncMock(return_value=[new_critique])):
+            result = await critic_node(state)
+        assert result["next_agent"] == "fact_checker"
+
+    @pytest.mark.asyncio
+    async def test_routes_to_fact_checker_when_max_research_rounds_reached(self):
+        """The global round cap must also stop the rework loop, even if the
+        per-finding rework cap hasn't been hit yet."""
+        from research_swarm.config import settings
+        from research_swarm.graph.nodes import critic_node
+
+        plan = _make_plan(1)
+        f = _make_finding(plan.sub_questions[0], confidence=0.3)
+        new_critique = _make_critique(f.id, CritiqueVerdict.weak)
+        state = _make_state(
+            plan=plan, findings=[f], critiques=[],
+            research_rounds=settings.max_research_rounds_shallow,  # at the global cap
+            query=ResearchQuery(topic="test", depth="shallow"),
+        )
+        with patch("research_swarm.graph.nodes._get_tiered_state_llm", return_value=_mock_llm()), \
+             patch("research_swarm.graph.nodes.run_critic", new=AsyncMock(return_value=[new_critique])):
+            result = await critic_node(state)
+        assert result["next_agent"] == "fact_checker"
+
+    @pytest.mark.asyncio
+    async def test_routes_to_fact_checker_when_all_findings_supported(self):
+        from research_swarm.graph.nodes import critic_node
+
+        plan = _make_plan(1)
+        f = _make_finding(plan.sub_questions[0], confidence=0.9)
+        new_critique = _make_critique(f.id, CritiqueVerdict.supported)
+        state = _make_state(
+            plan=plan, findings=[f], critiques=[], research_rounds=1,
+            query=ResearchQuery(topic="test", depth="deep"),
+        )
+        with patch("research_swarm.graph.nodes._get_tiered_state_llm", return_value=_mock_llm()), \
+             patch("research_swarm.graph.nodes.run_critic", new=AsyncMock(return_value=[new_critique])):
+            result = await critic_node(state)
+        assert result["next_agent"] == "fact_checker"
+
 
 class TestFactCheckerNode:
     @pytest.mark.asyncio
@@ -472,13 +917,61 @@ class TestFactCheckerNode:
 class TestWriterNode:
     @pytest.mark.asyncio
     async def test_returns_final_report(self):
+        from research_swarm.schemas.judge import JudgeVerdict, LLMJudgeResult
+
+        report = FinalReport(title="Test", exec_summary="Summary.")
+        judge_result = LLMJudgeResult(
+            coherence=5, relevance=5, completeness=5, citation_quality=5,
+            verdict=JudgeVerdict.approve, reasoning="no significant issues",
+        )
+        with patch("research_swarm.graph.nodes._get_tiered_state_llm", return_value=_mock_llm()), \
+             patch("research_swarm.graph.nodes.run_writer", new=AsyncMock(return_value=report)), \
+             patch("research_swarm.graph.nodes.judge_report", new=AsyncMock(return_value=judge_result)):
+            from research_swarm.graph.nodes import writer_node
+            result = await writer_node(_make_state(findings=[_make_finding()]))
+        assert result["final_report"].title == report.title
+        assert result["final_report"].exec_summary == report.exec_summary
+        assert result["final_report"].llm_judge == judge_result
+        assert result["writer_instructions"] is None
+
+    @pytest.mark.asyncio
+    async def test_judge_disabled_leaves_report_untouched(self):
+        from research_swarm.config import settings
+
         report = FinalReport(title="Test", exec_summary="Summary.")
         with patch("research_swarm.graph.nodes._get_tiered_state_llm", return_value=_mock_llm()), \
-             patch("research_swarm.graph.nodes.run_writer", new=AsyncMock(return_value=report)):
+             patch("research_swarm.graph.nodes.run_writer", new=AsyncMock(return_value=report)), \
+             patch.object(settings, "llm_judge_enabled", False):
             from research_swarm.graph.nodes import writer_node
             result = await writer_node(_make_state(findings=[_make_finding()]))
         assert result["final_report"] == report
-        assert result["writer_instructions"] is None
+        assert result["final_report"].llm_judge is None
+
+    @pytest.mark.asyncio
+    async def test_writes_a_real_report_even_when_review_budget_is_exhausted(self):
+        """The writer's own synthesis call is never budget-gated -- only the
+        optional LLM judge pass is. A worker-loop overrun (research pool)
+        exhausting the *review* pool must never produce the old empty
+        "Budget exceeded" placeholder when real findings exist; that
+        discarded already-gathered research for no benefit."""
+        from research_swarm.runtime.budget import clear_budget, get_budget
+
+        session_id = "sess-writer-review-budget"
+        clear_budget(session_id)
+        review = get_budget(session_id, limit=1, pool="review")
+        review.callback.on_chat_model_start({}, [])  # review pool now at its limit
+
+        report = FinalReport(title="Real Report", exec_summary="Real summary.")
+        with patch("research_swarm.graph.nodes._get_tiered_state_llm", return_value=_mock_llm()), \
+             patch("research_swarm.graph.nodes.run_writer", new=AsyncMock(return_value=report)):
+            from research_swarm.graph.nodes import writer_node
+            result = await writer_node(
+                _make_state(findings=[_make_finding()], session_id=session_id)
+            )
+
+        clear_budget(session_id)
+        assert result["final_report"].title == "Real Report"
+        assert result["final_report"].llm_judge is None  # judge skipped, report itself wasn't
 
 
 # ---------------------------------------------------------------------------
@@ -665,11 +1158,13 @@ class TestRunSupervisor:
 class TestRunCritic:
     @pytest.mark.asyncio
     async def test_reviews_unreviewed_findings(self):
-        from research_swarm.agents.critic import run_critic
+        from research_swarm.agents.critic import CritiqueBatch, run_critic
         f = _make_finding("q1")
         c = _make_critique(f.id, CritiqueVerdict.supported)
         mock_llm = MagicMock()
-        mock_llm.with_structured_output.return_value.ainvoke = AsyncMock(return_value=c)
+        mock_llm.with_structured_output.return_value.ainvoke = AsyncMock(
+            return_value=CritiqueBatch(critiques=[c])
+        )
         result = await run_critic(_make_state(findings=[f]), mock_llm)
         assert len(result) == 1
         assert result[0].finding_id == f.id
@@ -692,14 +1187,18 @@ class TestRunCritic:
 class TestRunFactChecker:
     @pytest.mark.asyncio
     async def test_updates_confidence(self):
-        from research_swarm.agents.fact_checker import FactCheckResult, run_fact_checker
+        from research_swarm.agents.fact_checker import (
+            FactCheckBatch,
+            FactCheckResult,
+            run_fact_checker,
+        )
         from research_swarm.schemas.source import Source, SourceType
         f = _make_finding("q1", confidence=0.4)
         src = Source(url="https://x.com", snippet="Evidence", source_type=SourceType.web)
         f = f.model_copy(update={"evidence": [src]})
         mock_llm = MagicMock()
         mock_llm.with_structured_output.return_value.ainvoke = AsyncMock(
-            return_value=FactCheckResult(confidence_score=0.85, notes="ok")
+            return_value=FactCheckBatch(results=[FactCheckResult(confidence_score=0.85, notes="ok")])
         )
         updated = await run_fact_checker(_make_state(findings=[f]), mock_llm)
         assert updated[0].confidence == pytest.approx(0.85)
@@ -820,6 +1319,87 @@ class TestResearchPipelinePhase4:
         # Findings and critiques should be present
         assert len(final["findings"]) == 2
         assert len(final["critiques"]) == 2
+
+
+class TestStandardDepthTerminates:
+    """Real (unmocked) dispatch_node/route_from_dispatch/collect_node/critic_node
+    wiring, standard depth (max_research_rounds_standard=3).
+
+    Only the agent-level LLM calls (run_supervisor, run_worker, run_critic,
+    run_fact_checker, run_writer) are mocked -- the graph's own control flow
+    is exercised for real. This is the scenario that surfaced a genuine
+    infinite dispatch<->collect loop: round 0 dispatches every sub-question,
+    then always loops back once (should_stop's "first round" fallback), and
+    that second dispatch always finds 0 targets since critiques are still
+    empty (critic hasn't run yet) -- route_from_dispatch's no-target Send
+    bounces straight to collect_node, and Send() gives the receiving node
+    ONLY its payload, not the full graph state. If that payload is missing
+    research_rounds/pre_dispatch_finding_ids/findings/critiques, collect_node
+    sees them reset to their defaults on every bounce, should_stop's hard
+    round cap never fires (it keeps reading research_rounds=0), and the
+    graph recurses until LangGraph's recursion limit kills it. This test
+    pins the fix in route_from_dispatch's _collect_bounce_payload.
+    """
+
+    @pytest.mark.asyncio
+    async def test_two_subquestions_standard_depth_reaches_writer(self):
+        from unittest.mock import patch as _patch
+
+        from langgraph.checkpoint.memory import MemorySaver
+
+        import research_swarm.graph.nodes as _nodes
+        from research_swarm.graph.builder import _serde, build_graph, get_thread_config
+        from research_swarm.schemas.report import ReportSection
+
+        plan = _make_plan(2)
+        findings_by_sq = {
+            sq: _make_finding(sq, confidence=0.8) for sq in plan.sub_questions
+        }
+        report = FinalReport(
+            title="Standard Depth Report",
+            exec_summary="Covers both sub-questions.",
+            sections=[ReportSection(heading="Overview", body_md="...", citations=[])],
+            references=[],
+        )
+
+        async def fake_run_supervisor(state, llm):
+            from research_swarm.agents.supervisor import SupervisorDecision
+            return SupervisorDecision(reasoning="Plan created.", next_agent="dispatch", plan=plan)
+
+        async def fake_run_worker(sub_question, role, state, llm, tools, summarizer_llm=None):
+            return findings_by_sq[sub_question]
+
+        async def fake_run_critic(state, llm):
+            findings = state.get("findings") or []
+            return [_make_critique(f.id, CritiqueVerdict.supported) for f in findings]
+
+        async def fake_run_fact_checker(state, llm):
+            return list(state.get("findings") or [])
+
+        async def fake_run_writer(state, llm):
+            return report
+
+        from research_swarm.config import settings
+
+        with _patch.object(_nodes, "run_supervisor", fake_run_supervisor), \
+             _patch.object(_nodes, "run_worker", fake_run_worker), \
+             _patch.object(_nodes, "run_critic", fake_run_critic), \
+             _patch.object(_nodes, "run_fact_checker", fake_run_fact_checker), \
+             _patch.object(_nodes, "run_writer", fake_run_writer), \
+             _patch.object(_nodes, "_get_tiered_state_llm", return_value=_mock_llm()), \
+             _patch.object(settings, "llm_judge_enabled", False):
+
+            graph = build_graph(checkpointer=MemorySaver(serde=_serde), interrupt_before_writer=False)
+            config = {**get_thread_config("standard-depth-terminates"), "recursion_limit": 30}
+            initial = {
+                **_make_state(),
+                "query": ResearchQuery(topic="Standard depth test", audience="technical", depth="standard"),
+            }
+            final = await graph.ainvoke(initial, config)
+
+        assert final["final_report"] == report
+        assert len(final["findings"]) == 2
+        assert final["research_rounds"] >= 1
 
 
 # ---------------------------------------------------------------------------

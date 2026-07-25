@@ -176,3 +176,33 @@ class IngestionPipeline:
     def ingest_source_dicts(self, source_dicts: list[dict], embed_model) -> int:
         """Bulk-ingest a list of Source dicts. Returns total chunks inserted."""
         return sum(self.ingest_source_dict(s, embed_model) for s in source_dicts)
+
+    def ingest_new_source_dicts(self, source_dicts: list[dict], embed_model) -> int:
+        """Bulk-ingest source dicts, skipping any whose URL is already stored.
+
+        A single metadata-only query (no embedding) checks which URLs are
+        already present in this session's collection; only genuinely new
+        ones are chunked and embedded. This makes re-ingesting the same
+        evidence across research rounds (a rework pass re-researching a
+        sub-question, or a later dispatch round) a cheap no-op instead of
+        duplicating chunks and letting one source get double-counted as two
+        pieces of "evidence" -- once from the tool call that found it, once
+        again later via retrieve_from_rag.
+
+        Sources without a URL can't be deduped (nothing to key on) and are
+        always ingested.
+        """
+        urls = [s.get("url") for s in source_dicts if s.get("url")]
+        seen: set[str] = set()
+        if urls:
+            collection = self._get_chroma_collection()
+            existing = collection.get(where={"url": {"$in": urls}}, include=["metadatas"])
+            seen = {
+                m["url"] for m in (existing.get("metadatas") or [])
+                if m and m.get("url")
+            }
+
+        new_sources = [s for s in source_dicts if not s.get("url") or s["url"] not in seen]
+        if not new_sources:
+            return 0
+        return self.ingest_source_dicts(new_sources, embed_model)

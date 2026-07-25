@@ -87,3 +87,30 @@ class AgentState(TypedDict):
     # Finding IDs present just before the most recent dispatch round.
     # collect_node uses this to identify which findings are newly produced.
     pre_dispatch_finding_ids: NotRequired[list[str]]
+
+    # How many times each sub-question (normalised, lowercased) has been sent
+    # back for rework after a weak/refuted critique verdict. Capped by
+    # settings.max_rework_attempts so one persistently-bad finding can't
+    # consume unbounded rework rounds. Incremented in collect_node once a
+    # rework round completes; read by critic_node (loop-back decision) and
+    # _research_targets (dispatch/route_from_dispatch fan-out).
+    rework_counts: NotRequired[dict[str, int]]
+
+    # --- Document pass: one-time full-document extraction, no Chroma ---
+
+    # User-uploaded documents ingested before the graph starts, each
+    # {"url", "title", "text", "source_type"}. Populated once in app.py.
+    # Consumed exactly once by document_pass_node/route_from_document_pass
+    # (fans out one worker per document, or per size-bounded slice of an
+    # oversized one) before round-0 dispatch -- not re-processed on later
+    # rounds since the documents themselves don't change mid-session.
+    ingested_documents: NotRequired[list[dict]]
+
+    # Per-document-worker state injected via Send; cleared after that
+    # worker's single call (mirrors active_sub_question/active_worker_role
+    # above, but for the document pass instead of the sub-question dispatch).
+    active_document:        NotRequired[dict | None]
+    active_doc_part_text:   NotRequired[str | None]
+    active_doc_part_index:  NotRequired[int]
+    active_doc_part_total:  NotRequired[int]
+    sub_questions_snapshot: NotRequired[list[str]]

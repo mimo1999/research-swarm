@@ -4,34 +4,46 @@ Phase-4 topology
 ================
 START → supervisor_node  (LLM: plan creation only)
           ↓ next_agent = "dispatch"
+        document_pass_node  (deterministic: one-time fan-out over ingested_documents)
+          ↓ Send × N (one per document, or per size-bounded slice of an oversized one)
+          │    — bounces straight to dispatch_node when there are no documents
+        document_worker_node  (single-shot full-document claim extraction, no tool loop)
+          ↓ findings merged by _merge_findings reducer
         dispatch_node  (deterministic: record pre-round IDs, fan out via Send)
-          ↓ Send × N (one per target sub-question)
+          ↓ Send × N (one per target sub-question — skips ones the document
+          │    pass already answered, via _research_targets' round-0 check)
         worker_node  (role-aware researcher for a single sub-question)
           ↓ findings merged by _merge_findings reducer
-        collect_node  (deterministic: stop-signal check)
+        collect_node  (deterministic: stop-signal check + rework bookkeeping)
           ├─ stop  → critic_node
-          └─ loop  → dispatch_node  (re-research weak sub-questions)
-        critic_node  → fact_checker_node  → writer_node  → END
+          └─ loop  → dispatch_node  (novelty/similarity signal still open)
+        critic_node  (LLM: verdicts, then decides whether to loop back)
+          ├─ weak/refuted findings under the rework cap → dispatch_node
+          │    (re-research just those; see settings.max_rework_attempts)
+          └─ else → fact_checker_node  → writer_node  → END
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from langchain_core.messages import AIMessage
 from langgraph.types import Send
 
-from research_swarm.agents.base import get_agent_llm, get_tiered_llm
+from research_swarm.agents.base import get_tiered_llm
 from research_swarm.agents.critic import run_critic
 from research_swarm.agents.fact_checker import run_fact_checker
 from research_swarm.agents.researcher import run_researcher  # kept for legacy node + test patching
 from research_swarm.agents.supervisor import SupervisorDecision, run_supervisor
 from research_swarm.agents.workers import run_worker
 from research_swarm.agents.writer import run_writer
+from research_swarm.config import settings
+from research_swarm.eval.llm_judge import judge_report
 from research_swarm.runtime.budget import BudgetExceeded, get_budget
 from research_swarm.schemas.state import AgentState
 from research_swarm.schemas.worker import WorkerRole
-from research_swarm.tools import arxiv_search, fetch_url, web_search
+from research_swarm.tools import arxiv_search, fetch_url, pubmed_search, web_search
 from research_swarm.tools.retriever_tool import build_retriever_tool
 
 logger = logging.getLogger(__name__)
@@ -42,7 +54,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _get_researcher_tools(max_sources: int | None = None, session_id: str | None = None):
-    tools = [web_search, arxiv_search, fetch_url]
+    tools = [web_search, arxiv_search, pubmed_search, fetch_url]
     try:
         tools.append(build_retriever_tool(max_sources=max_sources, session_id=session_id))
     except Exception as exc:
@@ -50,21 +62,82 @@ def _get_researcher_tools(max_sources: int | None = None, session_id: str | None
     return tools
 
 
-def _get_state_llm(state: AgentState):
-    """Create the chat model requested by this run's state, with budget callback."""
-    session_id = state.get("session_id", "default")
-    budget = get_budget(session_id)
-    return get_agent_llm(
-        provider=state.get("model_provider"),
-        model=state.get("model_name"),
-    ).with_config({"callbacks": [budget.callback]})
+def _finding_evidence_dicts(finding: Any) -> list[dict]:
+    """Return a Finding's evidence as plain dicts, regardless of Source vs dict shape."""
+    evidence = finding.evidence if hasattr(finding, "evidence") else finding.get("evidence", [])
+    out: list[dict] = []
+    for s in evidence:
+        if hasattr(s, "model_dump"):
+            out.append(s.model_dump(mode="json"))
+        elif isinstance(s, dict):
+            out.append(s)
+    return out
+
+
+async def _ingest_round_evidence(state: AgentState, findings: list) -> None:
+    """Persist this round's evidence into the session's RAG index.
+
+    Runs once per round from collect_node -- after all of this round's
+    Send-dispatched worker_node tasks have already merged -- so writes to the
+    session's Chroma collection are always sequential, never concurrent
+    across parallel workers. IngestionPipeline.ingest_new_source_dicts skips
+    URLs already present in the collection, so calling this on every round
+    (not just once) is a cheap no-op for evidence ingested in an earlier
+    round -- it only does real work for genuinely new sources.
+
+    This lets a rework pass (or a later dispatch round) check the
+    accumulated corpus via retrieve_from_rag before re-hitting the web for
+    the same ground a sibling worker already covered in an earlier round.
+
+    Best-effort: failure here (embedding model unavailable, disk issue) must
+    never block the graph's stop/rework routing decision.
+    """
+    all_evidence = [s for f in findings for s in _finding_evidence_dicts(f)]
+    if not all_evidence:
+        return
+    try:
+        from research_swarm.rag.indexes import get_embed_model
+        from research_swarm.rag.ingestion import IngestionPipeline
+
+        session_id = state.get("session_id", "default")
+        pipeline = IngestionPipeline(session_id)
+        embed_model = get_embed_model()
+        added = await asyncio.to_thread(
+            pipeline.ingest_new_source_dicts, all_evidence, embed_model
+        )
+        if added:
+            logger.info(
+                "Collect: persisted %d new evidence chunk(s) into session RAG index.",
+                added,
+            )
+    except Exception as exc:
+        logger.warning("Collect: evidence ingestion failed (%s) -- continuing.", exc)
 
 
 def _get_tiered_state_llm(state: AgentState, tier: str):
-    """Create a tiered LLM with budget callback attached."""
+    """Create a tiered LLM with budget callback attached.
+
+    For the 'standard' (worker) tier, the session's user-selected provider
+    overrides the static tier config -- so picking Anthropic/OpenAI in the UI
+    actually routes workers to that provider's lowest-grade model instead of
+    silently staying on the configured default (e.g. Ollama).
+
+    Callback is set via the model's own ``callbacks`` field (model_copy),
+    NOT ``.with_config({"callbacks": [...]})``. Every call site immediately
+    chains ``.with_structured_output(...)`` on the returned model, and
+    ``with_structured_output``/``bind_tools`` have no ``config`` parameter --
+    so RunnableBinding.__getattr__'s config-merging only kicks in for methods
+    that accept one, and for these it doesn't, silently returning
+    ``self.bound.with_structured_output(...)`` on the *unwrapped* model and
+    dropping the callback (and with it, all budget call/token counting).
+    Setting the field directly on the model instance survives that because
+    with_structured_output/bind_tools operate on `self` itself, not a wrapper.
+    """
     session_id = state.get("session_id", "default")
     budget = get_budget(session_id)
-    return get_tiered_llm(tier=tier).with_config({"callbacks": [budget.callback]})
+    provider_override = state.get("model_provider") if tier == "standard" else None
+    llm = get_tiered_llm(tier=tier, provider_override=provider_override)
+    return llm.model_copy(update={"callbacks": [budget.callback]})
 
 
 def _check_budget(state: AgentState, node_name: str) -> dict[str, Any] | None:
@@ -90,33 +163,59 @@ def _research_targets(state: AgentState) -> list[str]:
     """Return the sub-questions needing (re-)research this round.
 
     Round 0: every sub-question in the plan.  Later rounds: only sub-questions
-    whose latest finding is missing, weak, or refuted.  Shared by dispatch_node
-    and route_from_dispatch so their views of the round can never drift apart.
+    whose latest finding is weak or refuted, AND haven't already hit the
+    per-finding rework cap (``settings.max_rework_attempts`` — see
+    ``rework_counts`` in AgentState). Shared by dispatch_node, route_from_dispatch,
+    critic_node, and collect_node so all four views of a round agree exactly.
     """
-    from research_swarm.agents._utils import _latest_verdicts
-
     plan = state.get("plan")
     if not plan:
         return []
 
-    findings  = state.get("findings") or []
-    critiques = state.get("critiques") or []
+    findings = state.get("findings") or []
 
     if state.get("research_rounds", 0) == 0:
-        return list(plan.sub_questions)
+        # Round 0 used to unconditionally return every sub-question, which
+        # was safe only because nothing ran before dispatch. document_pass_node
+        # can now produce findings before round 0 (one-time full-document
+        # extraction from ingested documents) -- skip any sub-question that
+        # already has one of those, so round-0 web dispatch doesn't duplicate
+        # work a document already did. No weak/refuted distinction here:
+        # critiques is empty at genuine round 0, so any existing finding can
+        # only have come from the document pass, not a rejected re-research.
+        already_has_finding = {
+            (f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", ""))
+            .strip().lower()
+            for f in findings
+        }
+        return [sq for sq in plan.sub_questions if sq.strip().lower() not in already_has_finding]
 
+    from research_swarm.agents._utils import _latest_verdicts
+
+    critiques = state.get("critiques") or []
     latest_verdicts = _latest_verdicts(critiques)
     weak_or_refuted = {
         fid for fid, v in latest_verdicts.items() if v in {"weak", "refuted"}
     }
+    rework_counts = state.get("rework_counts") or {}
+    max_rework = settings.max_rework_attempts
+
     answered_sqs: set[str] = set()
+    capped_sqs: set[str] = set()
     for f in findings:
         sq  = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
         fid = f.id if hasattr(f, "id") else f.get("id", "")
+        norm_sq = sq.strip().lower()
         if fid not in weak_or_refuted:
-            answered_sqs.add(sq.strip().lower())
+            answered_sqs.add(norm_sq)
+        elif rework_counts.get(norm_sq, 0) >= max_rework:
+            capped_sqs.add(norm_sq)
 
-    return [sq for sq in plan.sub_questions if sq.strip().lower() not in answered_sqs]
+    return [
+        sq for sq in plan.sub_questions
+        if sq.strip().lower() not in answered_sqs
+        and sq.strip().lower() not in capped_sqs
+    ]
 
 
 def _depth_str(state: AgentState) -> str:
@@ -125,6 +224,126 @@ def _depth_str(state: AgentState) -> str:
         return "standard"
     d = query.depth
     return d.value if hasattr(d, "value") else str(d)
+
+
+# ---------------------------------------------------------------------------
+# document_pass_node  (deterministic bookkeeping, mirrors dispatch_node)
+# ---------------------------------------------------------------------------
+
+async def document_pass_node(state: AgentState) -> dict[str, Any]:
+    """Bookkeeping node before the one-time document-extraction fan-out.
+
+    The actual fan-out (one Send per document, or per size-bounded slice of
+    an oversized one) is handled by the conditional edge
+    route_from_document_pass. This node just logs -- same shape as
+    dispatch_node, which does the equivalent bookkeeping for the
+    sub-question fan-out.
+    """
+    docs = state.get("ingested_documents") or []
+    return {
+        "messages": [
+            AIMessage(content=(
+                f"[DocumentPass] {len(docs)} ingested document(s) to process."
+                if docs else "[DocumentPass] No ingested documents."
+            ))
+        ],
+    }
+
+
+def _dispatch_bounce_payload(state: AgentState) -> dict[str, Any]:
+    """Build the Send payload for a no-op bounce straight to dispatch_node.
+
+    Send() gives the receiving node ONLY this payload, not the full graph
+    state -- dispatch_node (and _research_targets, which it calls) needs
+    plan, findings, critiques, research_rounds, and rework_counts to make
+    its routing decision. Mirrors _collect_bounce_payload, which exists for
+    the identical reason on the dispatch->collect side.
+    """
+    return {
+        "session_id":      state.get("session_id", "default"),
+        "query":           state.get("query"),
+        "plan":            state.get("plan"),
+        "findings":        state.get("findings") or [],
+        "critiques":       state.get("critiques") or [],
+        "research_rounds": state.get("research_rounds", 0),
+        "rework_counts":   state.get("rework_counts") or {},
+        "human_feedback":  state.get("human_feedback"),
+        "model_provider":  state.get("model_provider"),
+        "model_name":      state.get("model_name"),
+    }
+
+
+def route_from_document_pass(state: AgentState):
+    """Return a list of Send objects — one per (document, part) to extract.
+
+    Bounces straight to dispatch_node (no document_worker_node calls) when
+    there are no ingested documents or no plan yet, exactly like
+    route_from_dispatch bounces straight to collect_node when there's
+    nothing to research.
+    """
+    docs = state.get("ingested_documents") or []
+    plan = state.get("plan")
+
+    if not docs or not plan or not plan.sub_questions:
+        return [Send("dispatch_node", _dispatch_bounce_payload(state))]
+
+    from research_swarm.agents.document_worker import _split_into_parts
+
+    session_id     = state.get("session_id", "default")
+    model_provider = state.get("model_provider")
+    model_name     = state.get("model_name")
+    sub_questions  = list(plan.sub_questions)
+
+    sends = []
+    for doc in docs:
+        parts = _split_into_parts(doc.get("text", ""))
+        for i, part_text in enumerate(parts):
+            sends.append(Send("document_worker_node", {
+                "active_document":        doc,
+                "active_doc_part_text":   part_text,
+                "active_doc_part_index":  i,
+                "active_doc_part_total":  len(parts),
+                "sub_questions_snapshot": sub_questions,
+                "session_id":             session_id,
+                "model_provider":         model_provider,
+                "model_name":             model_name,
+            }))
+    return sends
+
+
+# ---------------------------------------------------------------------------
+# document_worker_node  (single-shot full-document extraction)
+# ---------------------------------------------------------------------------
+
+async def document_worker_node(state: AgentState) -> dict[str, Any]:
+    """Extract claims from a single document (or one slice of an oversized one)."""
+    if (early := _check_budget(state, "DocumentWorker")):
+        return early
+
+    document  = state.get("active_document")
+    part_text = state.get("active_doc_part_text")
+    if not document or not part_text:
+        return {"messages": [AIMessage(content="[DocumentWorker] No document assigned; skipping.")]}
+
+    sub_questions = state.get("sub_questions_snapshot") or []
+    part_index    = state.get("active_doc_part_index", 0)
+    part_total    = state.get("active_doc_part_total", 1)
+
+    llm = _get_tiered_state_llm(state, "standard")
+
+    from research_swarm.agents.document_worker import run_document_worker
+    findings = await run_document_worker(
+        document, part_index, part_total, part_text, sub_questions, llm,
+    )
+
+    label = document.get("title") or document.get("url", "doc")
+    part_note = f" (part {part_index + 1}/{part_total})" if part_total > 1 else ""
+    return {
+        "findings": findings,
+        "messages": [
+            AIMessage(content=f"[DocumentWorker] {label}{part_note}: {len(findings)} finding(s).")
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -145,8 +364,10 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     if (early := _check_budget(state, "Supervisor")):
         return early
 
-    # supervisor uses the fast tier — it's just generating a plan structure
-    llm = _get_tiered_state_llm(state, "fast")
+    # Supervisor is the orchestrator — called once per session, so the larger
+    # model's cost doesn't compound the way it would for the per-sub-question
+    # worker calls. Use the thorough tier for plan-quality reasoning.
+    llm = _get_tiered_state_llm(state, "thorough")
     decision = await run_supervisor(state, llm)
 
     # Enforce dispatch routing regardless of LLM output
@@ -216,6 +437,30 @@ async def dispatch_node(state: AgentState) -> dict[str, Any]:
     }
 
 
+def _collect_bounce_payload(state: AgentState) -> dict[str, Any]:
+    """Build the Send payload for a no-op bounce straight to collect_node.
+
+    Send() gives the receiving node ONLY the payload dict, not the full graph
+    state -- collect_node needs research_rounds, pre_dispatch_finding_ids,
+    findings, critiques, and rework_counts to make its stop/rework decision.
+    Omitting any of these makes every field silently reset to its default
+    (0 / [] / {}) on that invocation, which defeats should_stop's hard round
+    cap (it keeps re-reading research_rounds=0) and produces an infinite
+    dispatch<->collect loop until LangGraph's recursion limit kills the run.
+    """
+    return {
+        "active_sub_question": None,
+        "session_id": state.get("session_id", "default"),
+        "query": state.get("query"),
+        "research_rounds": state.get("research_rounds", 0),
+        "pre_dispatch_finding_ids": state.get("pre_dispatch_finding_ids") or [],
+        "findings": state.get("findings") or [],
+        "critiques": state.get("critiques") or [],
+        "rework_counts": state.get("rework_counts") or {},
+        "human_feedback": state.get("human_feedback"),
+    }
+
+
 def route_from_dispatch(state: AgentState):
     """Return a list of Send objects — one worker per target sub-question.
 
@@ -226,13 +471,12 @@ def route_from_dispatch(state: AgentState):
     findings = state.get("findings") or []
 
     if not plan:
-        return [Send("collect_node", {"active_sub_question": None})]
+        return [Send("collect_node", _collect_bounce_payload(state))]
 
     targets = _research_targets(state)
     if not targets:
         # Nothing to research — bounce through a no-op worker to collect
-        return [Send("collect_node", {"active_sub_question": None,
-                                      "session_id": state.get("session_id", "default")})]
+        return [Send("collect_node", _collect_bounce_payload(state))]
 
     # Pass all state fields worker_node needs — Send gives it ONLY the payload dict,
     # not the full graph state, so we must explicitly forward session context.
@@ -279,12 +523,17 @@ async def worker_node(state: AgentState) -> dict[str, Any]:
     query = state.get("query")
     max_sources = query.max_sources if query else None
 
-    # Workers use the standard tier (quality matters here)
+    # Workers use the standard tier — the smallest model that can still do
+    # reliable tool-calling + synthesis, since this is called once per
+    # sub-question per tool turn (the highest call-volume node in the graph).
     llm   = _get_tiered_state_llm(state, "standard")
+    # Snippet condensation uses the fast tier — cheaper than the truncation
+    # it replaces would cost across the loop's repeated re-sends.
+    summarizer_llm = _get_tiered_state_llm(state, "fast")
     session_id = state.get("session_id", "default")
     tools = _get_researcher_tools(max_sources=max_sources, session_id=session_id)
 
-    finding = await run_worker(sub_question, role, state, llm, tools)
+    finding = await run_worker(sub_question, role, state, llm, tools, summarizer_llm=summarizer_llm)
 
     if finding is None:
         return {
@@ -311,8 +560,15 @@ async def worker_node(state: AgentState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def collect_node(state: AgentState) -> dict[str, Any]:
-    """Evaluate stop signal after a dispatch round; route to critic or re-dispatch."""
-    from research_swarm.config import settings
+    """Evaluate stop signal after a dispatch round; route to critic or re-dispatch.
+
+    Also records rework attempts: for any round beyond the first, the targets
+    ``_research_targets(state)`` just returned (still pre-increment here) are
+    exactly the sub-questions this round dispatched, so their rework_counts
+    get bumped by one. This runs before dispatch_node/route_from_dispatch see
+    the new counts for the *next* round, and after they saw the (unchanged)
+    counts for *this* round — so nothing drifts mid-round.
+    """
     from research_swarm.graph.stop import should_stop
 
     findings             = state.get("findings") or []
@@ -322,7 +578,15 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
     max_rounds           = settings.max_research_rounds(depth)
     human_feedback       = state.get("human_feedback")
 
+    await _ingest_round_evidence(state, findings)
+
     new_rounds = research_rounds + 1
+
+    rework_counts = dict(state.get("rework_counts") or {})
+    if research_rounds > 0:
+        for sq in _research_targets(state):
+            key = sq.strip().lower()
+            rework_counts[key] = rework_counts.get(key, 0) + 1
 
     # Human feedback always overrides stop signal — more research requested.
     if human_feedback:
@@ -331,6 +595,7 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
             "research_rounds": new_rounds,
             "next_agent": "dispatch",
             "human_feedback": None,   # consume so it doesn't re-trigger
+            "rework_counts": rework_counts,
             "messages": [AIMessage(
                 content=f"[Collect] Round {new_rounds}: re-dispatching (human feedback).",
             )],
@@ -351,6 +616,7 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
     return {
         "research_rounds": new_rounds,
         "next_agent": next_agent,
+        "rework_counts": rework_counts,
         "messages": [
             AIMessage(
                 content=(
@@ -362,24 +628,57 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
     }
 
 
-def route_from_collect(state: AgentState) -> str:
-    """Deterministic edge: read next_agent set by collect_node."""
-    return state.get("next_agent") or "critic"
-
-
 # ---------------------------------------------------------------------------
 # critic_node
 # ---------------------------------------------------------------------------
 
 async def critic_node(state: AgentState) -> dict[str, Any]:
+    """Review findings, then decide whether to loop back for rework.
+
+    Weak/refuted findings that haven't hit the per-finding rework cap
+    (settings.max_rework_attempts) get routed back through dispatch_node for
+    another attempt; everything else proceeds to fact_checker. This is the
+    only place next_agent="dispatch" gets set after critic runs, so
+    route_from_critic just reads it.
+    """
     if (early := _check_budget(state, "Critic")):
         return early
     # Critic uses fast tier — structured extraction, not synthesis
     llm = _get_tiered_state_llm(state, "fast")
     new_critiques = await run_critic(state, llm)
     logger.info("Critic produced %d critique(s).", len(new_critiques))
+
+    # _research_targets needs this round's critiques to compute weak/refuted
+    # targets, but they aren't merged into state until this node returns --
+    # build a temp view so the same shared function sees them now.
+    temp_state: AgentState = {  # type: ignore[typeddict-item]
+        **state,
+        "critiques": (state.get("critiques") or []) + new_critiques,
+    }
+    rework_targets = _research_targets(temp_state)
+
+    depth = _depth_str(state)
+    max_rounds = settings.max_research_rounds(depth)
+    research_rounds = state.get("research_rounds", 0)
+
+    if rework_targets and research_rounds < max_rounds:
+        next_agent = "dispatch"
+        logger.info(
+            "Critic: %d finding(s) weak/refuted and under the rework cap (%d) — re-dispatching.",
+            len(rework_targets), settings.max_rework_attempts,
+        )
+    else:
+        next_agent = "fact_checker"
+        if rework_targets:
+            logger.info(
+                "Critic: %d finding(s) remain weak/refuted but hit the round cap "
+                "(%d/%d) — proceeding to fact-checker.",
+                len(rework_targets), research_rounds, max_rounds,
+            )
+
     return {
         "critiques": new_critiques,
+        "next_agent": next_agent,
         "messages": [
             AIMessage(content=f"[Critic] Reviewed {len(new_critiques)} finding(s).")
         ],
@@ -430,6 +729,22 @@ async def writer_node(state: AgentState) -> dict[str, Any]:
     # Writer uses the thorough tier — synthesis quality matters most here
     llm = _get_tiered_state_llm(state, "thorough")
     report = await run_writer(state, llm)
+
+    if settings.llm_judge_enabled:
+        session_id = state.get("session_id", "default")
+        budget = get_budget(session_id)
+        try:
+            budget.check()
+        except BudgetExceeded:
+            logger.info("Writer: skipping LLM judge — budget exhausted.")
+        else:
+            judge_llm = _get_tiered_state_llm(state, settings.llm_judge_tier)
+            query = state.get("query")
+            plan = state.get("plan")
+            judge_result = await judge_report(
+                report, plan, judge_llm, topic=query.topic if query else ""
+            )
+            report = report.model_copy(update={"llm_judge": judge_result})
 
     logger.info("Writer produced report: %r", report.title)
     return {

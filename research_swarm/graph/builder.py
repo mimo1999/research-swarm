@@ -10,7 +10,7 @@ from langgraph.graph import END, START, StateGraph
 
 import research_swarm.graph.nodes as _nodes
 from research_swarm.config import settings
-from research_swarm.graph.edges import route_from_collect, route_from_supervisor
+from research_swarm.graph.edges import route_from_collect, route_from_critic, route_from_supervisor
 from research_swarm.schemas.state import AgentState
 
 # ---------------------------------------------------------------------------
@@ -34,6 +34,8 @@ _SCHEMA_MODULES: list[tuple[str, str]] = [
     ("research_swarm.schemas.report",   "ReportSection"),
     ("research_swarm.schemas.report",   "FinalReport"),
     ("research_swarm.schemas.report",   "ReportQualityScore"),
+    ("research_swarm.schemas.judge",    "JudgeVerdict"),
+    ("research_swarm.schemas.judge",    "LLMJudgeResult"),
 ]
 
 _serde = JsonPlusSerializer(allowed_msgpack_modules=_SCHEMA_MODULES)
@@ -90,25 +92,39 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
 
     # ── Node registration ──────────────────────────────────────────────────
     # Evaluated at build_graph() call time so unittest.mock patches work.
-    sg.add_node("supervisor",    _nodes.supervisor_node)
-    sg.add_node("dispatch_node", _nodes.dispatch_node)
-    sg.add_node("worker_node",   _nodes.worker_node)
-    sg.add_node("collect_node",  _nodes.collect_node)
-    sg.add_node("critic",        _nodes.critic_node)
-    sg.add_node("fact_checker",  _nodes.fact_checker_node)
-    sg.add_node("writer",        _nodes.writer_node)
+    sg.add_node("supervisor",           _nodes.supervisor_node)
+    sg.add_node("document_pass_node",   _nodes.document_pass_node)
+    sg.add_node("document_worker_node", _nodes.document_worker_node)
+    sg.add_node("dispatch_node",        _nodes.dispatch_node)
+    sg.add_node("worker_node",          _nodes.worker_node)
+    sg.add_node("collect_node",         _nodes.collect_node)
+    sg.add_node("critic",               _nodes.critic_node)
+    sg.add_node("fact_checker",         _nodes.fact_checker_node)
+    sg.add_node("writer",               _nodes.writer_node)
     # Legacy researcher node kept so old tests / checkpoints continue to work
-    sg.add_node("researcher",    _nodes.researcher_node)
+    sg.add_node("researcher",           _nodes.researcher_node)
 
     # ── Entry ──────────────────────────────────────────────────────────────
     sg.add_edge(START, "supervisor")
 
-    # supervisor → dispatch_node (plan created; routing is deterministic)
+    # supervisor → document_pass_node (plan created; routing is deterministic)
     sg.add_conditional_edges(
         "supervisor",
         route_from_supervisor,
-        {"dispatch_node": "dispatch_node", END: END},
+        {"document_pass_node": "document_pass_node", END: END},
     )
+
+    # document_pass_node → [document_worker_node × N] via Send fan-out, or a
+    # bounce straight to dispatch_node when there are no ingested documents
+    sg.add_conditional_edges(
+        "document_pass_node",
+        _nodes.route_from_document_pass,   # returns list[Send]
+    )
+
+    # All parallel document workers converge at dispatch_node (outputs
+    # merged by the findings reducer) for the normal round-0 sub-question
+    # dispatch, which now skips any sub-question the document pass answered.
+    sg.add_edge("document_worker_node", "dispatch_node")
 
     # dispatch_node → [worker_node × N]  via Send fan-out
     sg.add_conditional_edges(
@@ -127,7 +143,12 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
     )
 
     # ── Post-critic pipeline (deterministic) ──────────────────────────────
-    sg.add_edge("critic",       "fact_checker")
+    # critic → dispatch_node (rework weak/refuted findings, capped) OR fact_checker
+    sg.add_conditional_edges(
+        "critic",
+        route_from_critic,
+        {"dispatch_node": "dispatch_node", "fact_checker": "fact_checker"},
+    )
     sg.add_edge("fact_checker", "writer")
     sg.add_edge("writer",       END)
 

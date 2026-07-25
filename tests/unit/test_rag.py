@@ -38,6 +38,7 @@ def session_id(tmp_path, monkeypatch):
 def _fake_chroma_collection(count: int = 0):
     coll = MagicMock()
     coll.count.return_value = count
+    coll.get.return_value = {"metadatas": []}
     return coll
 
 
@@ -199,6 +200,75 @@ class TestIngestionPipeline:
         n = pipeline.ingest_source_dicts(sources, _fake_embed_model())
         assert n >= 3  # at least one chunk per source
 
+    @patch("research_swarm.rag.ingestion.chromadb.PersistentClient")
+    @patch("research_swarm.rag.ingestion.VectorStoreIndex")
+    def test_ingest_new_source_dicts_skips_seen_urls(self, mock_vi, mock_chroma_cls, session_id):
+        coll = _fake_chroma_collection()
+        coll.get.return_value = {"metadatas": [{"url": "https://seen.com"}]}
+        mock_chroma_cls.return_value = _fake_chroma_client(coll)
+        mock_vi.from_documents.return_value = MagicMock()
+
+        from research_swarm.rag.ingestion import IngestionPipeline
+        pipeline = IngestionPipeline(session_id)
+        sources = [
+            {"url": "https://seen.com", "snippet": "Old content. " * 20},
+            {"url": "https://new.com", "snippet": "New content. " * 20},
+        ]
+        n = pipeline.ingest_new_source_dicts(sources, _fake_embed_model())
+
+        assert n >= 1
+        (called_docs,), _ = mock_vi.from_documents.call_args
+        assert all("New content" in d.text for d in called_docs)
+
+    @patch("research_swarm.rag.ingestion.chromadb.PersistentClient")
+    @patch("research_swarm.rag.ingestion.VectorStoreIndex")
+    def test_ingest_new_source_dicts_all_new_when_collection_empty(
+        self, mock_vi, mock_chroma_cls, session_id,
+    ):
+        mock_chroma_cls.return_value = _fake_chroma_client(_fake_chroma_collection())
+        mock_vi.from_documents.return_value = MagicMock()
+
+        from research_swarm.rag.ingestion import IngestionPipeline
+        pipeline = IngestionPipeline(session_id)
+        n = pipeline.ingest_new_source_dicts(
+            [{"url": "https://a.com", "snippet": "Content. " * 20}], _fake_embed_model(),
+        )
+        assert n >= 1
+
+    @patch("research_swarm.rag.ingestion.chromadb.PersistentClient")
+    @patch("research_swarm.rag.ingestion.VectorStoreIndex")
+    def test_ingest_new_source_dicts_returns_zero_when_all_urls_seen(
+        self, mock_vi, mock_chroma_cls, session_id,
+    ):
+        coll = _fake_chroma_collection()
+        coll.get.return_value = {"metadatas": [{"url": "https://seen.com"}]}
+        mock_chroma_cls.return_value = _fake_chroma_client(coll)
+
+        from research_swarm.rag.ingestion import IngestionPipeline
+        pipeline = IngestionPipeline(session_id)
+        n = pipeline.ingest_new_source_dicts(
+            [{"url": "https://seen.com", "snippet": "Old. " * 20}], _fake_embed_model(),
+        )
+        assert n == 0
+        mock_vi.from_documents.assert_not_called()
+
+    @patch("research_swarm.rag.ingestion.chromadb.PersistentClient")
+    @patch("research_swarm.rag.ingestion.VectorStoreIndex")
+    def test_ingest_new_source_dicts_urlless_sources_always_ingested(
+        self, mock_vi, mock_chroma_cls, session_id,
+    ):
+        coll = _fake_chroma_collection()
+        mock_chroma_cls.return_value = _fake_chroma_client(coll)
+        mock_vi.from_documents.return_value = MagicMock()
+
+        from research_swarm.rag.ingestion import IngestionPipeline
+        pipeline = IngestionPipeline(session_id)
+        n = pipeline.ingest_new_source_dicts(
+            [{"snippet": "No URL here. " * 20}], _fake_embed_model(),
+        )
+        assert n >= 1
+        coll.get.assert_not_called()  # no URLs to dedup-check, so no metadata query
+
     def test_collection_name_is_safe(self):
         from research_swarm.rag.ingestion import _collection_name
         # UUIDs with hyphens
@@ -272,8 +342,9 @@ class TestLoadVectorIndex:
 class TestProbeOllama:
     def setup_method(self):
         # Reset the module-level TTL cache so each test gets a fresh HTTP call.
+        # Keyed by base URL -- sessions may target different daemons.
         import research_swarm.rag.query_engines as qe
-        qe._ollama_probe_cache = None
+        qe._ollama_probe_cache.clear()
 
     def test_returns_true_when_ollama_up(self):
         with patch("research_swarm.rag.query_engines.httpx.get") as mock_get:
@@ -293,6 +364,19 @@ class TestProbeOllama:
             mock_get.return_value = MagicMock(status_code=503)
             from research_swarm.rag.query_engines import probe_ollama
             assert probe_ollama() is False
+
+    def test_cache_is_keyed_by_base_url(self):
+        """A cached 'unreachable' for one daemon must not answer for another."""
+        from research_swarm.rag.query_engines import probe_ollama
+
+        with patch("research_swarm.rag.query_engines.httpx.get") as mock_get:
+            mock_get.return_value = MagicMock(status_code=503)
+            assert probe_ollama("http://down:11434") is False
+
+            mock_get.return_value = MagicMock(status_code=200)
+            assert probe_ollama("http://up:11434") is True
+            # The first URL still serves its own cached result.
+            assert probe_ollama("http://down:11434") is False
 
 
 class TestGetLocalLLM:
