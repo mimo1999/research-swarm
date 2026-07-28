@@ -12,7 +12,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
 
-from research_swarm.agents._utils import schema_output_instruction
+from research_swarm.agents._utils import recover_from_parse_failure, schema_output_instruction
 from research_swarm.schemas import Finding, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -26,10 +26,21 @@ logger = logging.getLogger(__name__)
 # the dominant factor in per-sub-question latency with slow cloud models.
 _TOOL_TURNS_BY_DEPTH: dict[str, int] = {
     "shallow":  1,   # single search call, no follow-up fetches
-    "standard": 3,   # balanced
+    "standard": 4,   # balanced
     "deep":     6,   # thorough: original behaviour
 }
 MAX_TOOL_TURNS = _TOOL_TURNS_BY_DEPTH["standard"]  # module-level fallback
+
+# Max sources kept per finding after relevance ranking. Same as the legacy
+# flat cap (10) -- measured empirically (RAGAs faithfulness/context_precision
+# on a live swarm run) that ranking by relevance is what fixes low context
+# precision (~0.51 -> ~0.76-0.80), while *also* shrinking this cap to 6 traded
+# away faithfulness (~0.64 -> ~0.45): claims now carry several distinct
+# numeric/quantitative sub-statements (see the synthesis-prompt fix), each
+# needing its own grounding, and a smaller pool starves that. Ranking alone,
+# at the same cap, gets nearly all the precision gain without that cost. See
+# _rank_sources_by_relevance.
+MAX_EVIDENCE_SOURCES = 10
 
 
 def _norm(s: str) -> str:
@@ -48,13 +59,26 @@ class FindingSynthesis(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+class _SnippetSummaries(BaseModel):
+    summaries: list[str] = Field(
+        default_factory=list,
+        description=(
+            "One condensed summary per excerpt, in the same order. Each summary is "
+            "2-4 sentences that preserve every fact, number, date, and named entity "
+            "relevant to the research question -- do not add opinions or omit specifics "
+            "to save space."
+        ),
+    )
+
+
 _SYSTEM_PROMPT = """\
 You are an expert Research Agent. Your goal is to answer a research sub-question
 by calling the available tools to gather evidence, then synthesising your findings.
 
 Available tools:
   web_search        -- search the web (Tavily)
-  arxiv_search      -- search arXiv preprints
+  arxiv_search      -- search arXiv preprints (physics/CS/math -- NOT biomedical)
+  pubmed_search     -- search PubMed (biomedical/clinical/life-sciences literature)
   fetch_url         -- fetch and extract text from a URL
   retrieve_from_rag -- query documents already ingested into the session RAG index
 
@@ -72,20 +96,106 @@ _STRATEGY_SHALLOW = """\
 
 _STRATEGY_DEFAULT = """\
 1. Start with retrieve_from_rag to check if the answer is already in the session corpus.
-2. Use web_search and arxiv_search for fresh information.
+2. Use web_search for fresh information. For medical/clinical/biological
+   questions use pubmed_search; for CS/physics/math questions use
+   arxiv_search -- arxiv_search barely indexes biomedical literature, and
+   pubmed_search has no CS/physics/math coverage, so pick the one that
+   matches the sub-question's actual domain.
 3. Fetch promising URLs for detail.
 4. Stop calling tools once you have enough evidence (3-5 good sources)."""
 
 _SYNTHESIS_JSON_SUFFIX = schema_output_instruction(FindingSynthesis)
+
+_SUMMARIZE_SYSTEM_PROMPT = (
+    "You condense raw source excerpts into compact evidence for a research question. "
+    "For each excerpt below, write a summary that preserves every specific fact, number, "
+    "date, and named entity relevant to the question. Do not add opinions, and do not drop "
+    "information to save space beyond removing filler prose."
+    + schema_output_instruction(_SnippetSummaries)
+)
+
+# Excerpts shorter than this rarely lose anything to truncation, so skip the
+# summarization call for them entirely -- it would cost more tokens than it saves.
+_SUMMARIZE_THRESHOLD_CHARS = 400
 
 
 def _synthesis_prompt(sub_question: str) -> str:
     """Build the synthesis prompt for a specific sub-question."""
     return (
         f"Based on the evidence gathered above, write a concise, factual claim that "
-        f"directly answers the sub-question: \"{sub_question}\""
+        f"directly answers the sub-question: \"{sub_question}\"\n\n"
+        "If the evidence contains specific numbers -- effect sizes, percentages, "
+        "sample sizes, p-values, confidence intervals, dosages, durations -- state "
+        "them exactly as given. Do not compress a quantitative result down to a "
+        "qualitative gist (e.g. \"showed improvement\"): the numbers ARE the finding, "
+        "and a claim without them is far less useful even if it points the right "
+        "direction.\n\n"
+        "If the evidence gives you numbers from more than one source to compare "
+        "(e.g. two techniques, a before/after, different model sizes), check they "
+        "were actually measured under comparable conditions -- same model size/scale, "
+        "same benchmark or task, same setup -- before presenting them as a direct "
+        "comparison. Sources you gathered may cover different scales or setups even "
+        "when they're both relevant to this sub-question. If the conditions don't "
+        "match, say so in the claim itself (e.g. \"not directly comparable -- X was "
+        "measured on a much smaller model\") instead of juxtaposing the numbers as if "
+        "they were equivalent."
         + _SYNTHESIS_JSON_SUFFIX
     )
+
+
+async def _summarize_tool_items(
+    items: list[Any],
+    sub_question: str,
+    summarizer_llm: BaseChatModel,
+) -> list[Any]:
+    """Replace long snippets with LLM-condensed summaries instead of hard-truncating.
+
+    Character truncation cuts mid-sentence and can drop the exact fact a finding
+    needs. This runs the excerpts through the cheapest tier once (batched, one
+    call per tool invocation) so the compressed version -- not a chopped one --
+    is what gets re-sent on every subsequent turn of the ReAct loop.
+    """
+    idx_to_summarize = [
+        i for i, item in enumerate(items)
+        if isinstance(item, dict)
+        and isinstance(item.get("snippet"), str)
+        and len(item["snippet"]) > _SUMMARIZE_THRESHOLD_CHARS
+        and not item["snippet"].startswith("[")  # skip error placeholders
+    ]
+    if not idx_to_summarize:
+        return items
+
+    excerpts_block = "\n\n".join(
+        f"[{n + 1}] {items[i]['snippet'][:4000]}" for n, i in enumerate(idx_to_summarize)
+    )
+    user_msg = HumanMessage(
+        content=(
+            f"Research question: {sub_question}\n\n"
+            f"Excerpts ({len(idx_to_summarize)}):\n{excerpts_block}\n\n"
+            "Return one summary per excerpt above, in order."
+        )
+    )
+
+    try:
+        structured = summarizer_llm.with_structured_output(_SnippetSummaries)
+        result: _SnippetSummaries = await structured.ainvoke(
+            [SystemMessage(content=_SUMMARIZE_SYSTEM_PROMPT), user_msg]
+        )
+    except Exception as exc:
+        logger.warning("Snippet summarization failed (%d excerpts): %s", len(idx_to_summarize), exc)
+        return items
+
+    if len(result.summaries) != len(idx_to_summarize):
+        logger.warning(
+            "Snippet summarizer returned %d summaries for %d excerpts; keeping originals.",
+            len(result.summaries), len(idx_to_summarize),
+        )
+        return items
+
+    out = list(items)
+    for i, summary in zip(idx_to_summarize, result.summaries):
+        out[i] = {**out[i], "snippet": summary}
+    return out
 
 
 def _serialize_tool_result(result: Any, max_chars: int = 8000) -> str:
@@ -94,14 +204,16 @@ def _serialize_tool_result(result: Any, max_chars: int = 8000) -> str:
     A naive ``json.dumps(result)[:max_chars]`` truncation can produce invalid JSON
     when the result is a list of source dicts whose snippets push the total length
     past the limit — ``json.loads`` then silently fails and all source metadata is
-    lost.  This function truncates per-item snippets first so the outer JSON array
-    always remains valid and ``_extract_sources_from_messages`` can parse it.
+    lost. This function caps per-item snippets first so the outer JSON array always
+    remains valid and ``_extract_sources_from_messages`` can parse it. This cap is a
+    safety net only: normal-sized snippets are expected to already have been condensed
+    by ``_summarize_tool_items`` upstream, not hard-truncated here.
     """
     if isinstance(result, list):
         trimmed = []
         for item in result:
             if isinstance(item, dict) and "snippet" in item and isinstance(item["snippet"], str):
-                item = {**item, "snippet": item["snippet"][:600]}
+                item = {**item, "snippet": item["snippet"][:1200]}
             trimmed.append(item)
         result = trimmed
     serialized = json.dumps(result, default=str)
@@ -115,8 +227,14 @@ async def _run_tool_loop(
     tool_map: dict[str, BaseTool],
     system_msg: SystemMessage,
     max_turns: int = MAX_TOOL_TURNS,
+    summarizer_llm: BaseChatModel | None = None,
 ) -> list[Any]:
-    """Run tool-calling loop for a single sub-question. Returns full message history."""
+    """Run tool-calling loop for a single sub-question. Returns full message history.
+
+    ``summarizer_llm``, when given, condenses each tool result's snippets via a
+    cheap-tier LLM call instead of hard-truncating them -- see
+    ``_summarize_tool_items``. Pass ``None`` to fall back to truncation only.
+    """
     messages: list[Any] = [
         system_msg,
         HumanMessage(content=f"Sub-question to research: {sub_question}"),
@@ -134,6 +252,8 @@ async def _run_tool_loop(
             tool_args = tc["args"]
             tool_id = tc["id"]
 
+            logger.info("Tool call: %s(%s)", tool_name, tool_args)
+
             tool_fn = tool_map.get(tool_name)
             if tool_fn is None:
                 result = f"[Unknown tool: {tool_name}]"
@@ -145,6 +265,9 @@ async def _run_tool_loop(
                 except Exception as exc:
                     result = f"[Tool error: {exc}]"
 
+            if summarizer_llm is not None and isinstance(result, list):
+                result = await _summarize_tool_items(result, sub_question, summarizer_llm)
+
             messages.append(
                 ToolMessage(
                     content=_serialize_tool_result(result),
@@ -155,8 +278,66 @@ async def _run_tool_loop(
     return messages
 
 
-def _extract_sources_from_messages(messages: list[Any]) -> list[Source]:
-    """Parse Source dicts out of ToolMessage content."""
+async def _rank_sources_by_relevance(
+    sub_question: str, sources: list[Source], top_k: int = MAX_EVIDENCE_SOURCES,
+) -> list[Source]:
+    """Return the top_k sources most relevant to sub_question.
+
+    Sources previously reached the Finding's evidence list in whatever order
+    the tool loop happened to accumulate them across turns -- unrelated to
+    relevance -- then got flatly truncated. That's why RAGAs context_precision
+    measured ~0.3-0.5: half the attached "evidence" was noise the LLM never
+    actually used, just the first N results across however many tool calls
+    fired. This ranks by embedding similarity to the actual sub-question
+    instead of accumulation order.
+
+    Uses BGE embeddings (get_embed_model), not the ms-marco cross-encoder in
+    rag/reranker.py -- that reranker explicitly skips long sentence-style
+    queries (>8 words) as out-of-distribution, and worker sub-questions are
+    almost always long natural-language questions, so it would silently no-op
+    on exactly the case this needs to handle. BGE is already used elsewhere
+    in this project for this exact kind of long-question semantic matching
+    (graph/stop.py, eval/faithfulness.py).
+    """
+    if len(sources) <= top_k:
+        return sources
+
+    try:
+        from research_swarm.rag.indexes import get_embed_model
+        model = get_embed_model()
+
+        def _cosine(a: list[float], b: list[float]) -> float:
+            import math
+            dot = sum(x * y for x, y in zip(a, b))
+            mag_a = math.sqrt(sum(x * x for x in a))
+            mag_b = math.sqrt(sum(x * x for x in b))
+            return dot / (mag_a * mag_b) if mag_a and mag_b else 0.0
+
+        q_emb = model.get_text_embedding(sub_question)
+        scored = [
+            (_cosine(q_emb, model.get_text_embedding(f"{s.title}\n{s.snippet}".strip() or s.url)), s)
+            for s in sources
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [s for _, s in scored[:top_k]]
+    except Exception as exc:
+        logger.warning(
+            "Source relevance ranking failed (%s) -- keeping first %d in original order.",
+            exc, top_k,
+        )
+        return sources[:top_k]
+
+
+async def _extract_sources_from_messages(
+    messages: list[Any], sub_question: str | None = None,
+) -> list[Source]:
+    """Parse Source dicts out of ToolMessage content.
+
+    When sub_question is given, the returned list is ranked by relevance to
+    it (see _rank_sources_by_relevance) and capped at MAX_EVIDENCE_SOURCES.
+    Without it, falls back to the original flat first-10 behaviour -- kept
+    for callers that don't have a sub-question in scope.
+    """
     sources: list[Source] = []
     for msg in messages:
         if not isinstance(msg, ToolMessage):
@@ -172,7 +353,9 @@ def _extract_sources_from_messages(messages: list[Any]) -> list[Source]:
                     sources.append(Source(**item))
                 except Exception:
                     pass
-    return sources[:10]  # cap evidence list
+    if sub_question:
+        return await _rank_sources_by_relevance(sub_question, sources)
+    return sources[:10]  # legacy cap for callers without a sub_question
 
 
 async def run_researcher(
@@ -253,7 +436,7 @@ async def run_researcher(
             max_turns=max_turns,
         )
 
-        sources = _extract_sources_from_messages(messages)
+        sources = await _extract_sources_from_messages(messages, sub_question=sub_q)
 
         # Synthesise a finding from the gathered evidence
         synthesis_prompt = _synthesis_prompt(sub_q)
@@ -263,10 +446,15 @@ async def run_researcher(
             synthesis: FindingSynthesis = await synthesis_llm.ainvoke(synthesis_messages)
         except Exception as exc:
             logger.warning("Synthesis failed for sub-question %r: %s", sub_q, exc)
-            synthesis = FindingSynthesis(
-                claim=f"[Research incomplete for: {sub_q}]",
-                confidence=0.2,
-            )
+            recovered = recover_from_parse_failure(exc, FindingSynthesis)
+            if recovered is not None:
+                logger.info("Recovered synthesis from malformed completion for %r", sub_q)
+                synthesis = recovered
+            else:
+                synthesis = FindingSynthesis(
+                    claim=f"[Research incomplete for: {sub_q}]",
+                    confidence=0.2,
+                )
 
         # Check if this sub-question already has a finding (re-research -> overwrite by id).
         # Normalise the stored sub_question string before comparing so that trivial

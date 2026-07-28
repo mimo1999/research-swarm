@@ -25,6 +25,29 @@ Guidelines:
   - Cite sources using [N] notation where N is the 1-based index in the references list.
   - Each section should directly address the corresponding sub-question.
   - Be accurate: only include claims supported by the evidence.
+  - Preserve exact numbers from the findings below -- effect sizes, percentages,
+    sample sizes, p-values, confidence intervals, dosages, durations. If a finding
+    states "-3.5 points (95% CI -6.7 to -0.3; p=0.03)", write that, not "showed
+    improvement". Collapsing a quantitative result into a qualitative gist during
+    synthesis is a bigger loss than any single missing detail below -- the numbers
+    ARE the finding.
+  - Cite precisely, not in bulk. Each finding below lists its sources as
+    "[N] Title" so you can tell which source plausibly covers which specific
+    number or sub-claim. When a finding bundles several distinct facts from
+    different sources, attach each sentence only the citation(s) that actually
+    support IT -- do not tack the finding's entire source list onto every
+    sentence derived from it. If you genuinely cannot tell which source backs a
+    specific number, cite only the source(s) whose title plausibly covers that
+    claim rather than citing all of them defensively.
+  - Before presenting two quantitative results side by side as a comparison
+    (e.g. "X vs Y", a before/after, a table row), verify they were actually
+    measured under comparable conditions -- same model size/scale, same
+    benchmark or task, same evaluation setup. Findings may bundle numbers
+    gathered from sources covering different scales or setups; if the
+    conditions don't match, either compare only the matched-scale figures or
+    state plainly that the comparison isn't apples-to-apples (e.g. "not
+    directly comparable -- measured on a much smaller model") instead of
+    presenting mismatched figures as if they were equivalent.
   - Acknowledge limitations honestly.
   - Incorporate any human feedback provided below.
   - Leave the `references` array EMPTY ([]) — it is populated programmatically
@@ -62,21 +85,32 @@ def _collect_references(findings: list) -> list[Source]:
     return refs
 
 
-def _format_findings(findings: list, ref_index: dict[str, int]) -> str:
+def _format_findings(findings: list, references: list[Source]) -> str:
+    """Format findings for the writer prompt, one source-per-citation.
+
+    Each evidence source is listed as "[N] Title" rather than a bare number
+    cluster -- the writer's prompt instructs it to attach only the citation(s)
+    that plausibly cover a given sentence/number, which requires being able to
+    tell sources apart by more than an index. A bare "[2],[3],[4],[5],[6]"
+    block gives it nothing to distinguish between them, and it just re-attaches
+    the whole cluster to every sentence derived from the finding.
+    """
+    ref_lookup = {r.url: (i + 1, r.title) for i, r in enumerate(references)}
     lines = []
     for i, f in enumerate(findings, 1):
         claim = f.claim if hasattr(f, "claim") else f.get("claim", "")
         confidence = f.confidence if hasattr(f, "confidence") else f.get("confidence", 0.5)
         sub_q = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
         evidence = f.evidence if hasattr(f, "evidence") else f.get("evidence", [])
-        citation_nums = [
-            str(ref_index[e.url if hasattr(e, "url") else e.get("url", "")])
-            for e in evidence
-            if (e.url if hasattr(e, "url") else e.get("url", "")) in ref_index
-        ]
-        citations = ", ".join(f"[{n}]" for n in citation_nums[:5])
+        cite_parts = []
+        for e in evidence[:5]:
+            url = e.url if hasattr(e, "url") else e.get("url", "")
+            if url in ref_lookup:
+                num, title = ref_lookup[url]
+                cite_parts.append(f"[{num}] {title}" if title else f"[{num}]")
+        sources_line = "; ".join(cite_parts) if cite_parts else "(no sources)"
         lines.append(
-            f"{i}. [{sub_q}] {claim} (confidence={confidence:.2f}) {citations}"
+            f"{i}. [{sub_q}] {claim} (confidence={confidence:.2f})\n   Sources: {sources_line}"
         )
     return "\n".join(lines)
 
@@ -119,12 +153,11 @@ async def run_writer(
         )
 
     references = _collect_references(valid_findings)
-    ref_index = {r.url: i + 1 for i, r in enumerate(references)}
 
     sources_text = "\n".join(
         f"[{i+1}] {r.url} -- {r.title}" for i, r in enumerate(references)
     )
-    findings_text = _format_findings(valid_findings, ref_index)
+    findings_text = _format_findings(valid_findings, references)
     sub_questions = "\n".join(
         f"  - {q}" for q in (plan.sub_questions if plan else [])
     )
