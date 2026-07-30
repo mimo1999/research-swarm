@@ -18,8 +18,17 @@ if TYPE_CHECKING:
     from research_swarm.schemas.state import AgentState
 
 
-# Sub-question limits by depth — controls how many sub-questions the LLM is
-# allowed to generate in the initial research plan.
+# Sub-question count by depth — controls how many sub-questions the LLM
+# generates in the initial research plan (1 worker per sub-question). Fixed
+# exactly, not a ceiling: "AT MOST N" gave the model no pressure to actually
+# use the budget -- observed producing a single sub-question at standard
+# depth for a topic explicitly asking to compare two named techniques,
+# silently dropping one side of the comparison entirely. An exact count
+# removes that decision from the model altogether.
+# standard reverted 5 -> 4: raising it (alongside more tool turns per worker)
+# pushed a live run's total LLM-call usage to 49 against a 40 budget. Fewer
+# workers, each with a shorter tool loop (see _TOOL_TURNS_BY_DEPTH in
+# researcher.py), keeps a session's call volume predictable.
 _SUB_QUESTIONS_BY_DEPTH: dict[str, int] = {
     "shallow":  1,
     "standard": 4,
@@ -29,7 +38,7 @@ _SUB_QUESTIONS_BY_DEPTH: dict[str, int] = {
 
 def _build_system_prompt(depth: str = "standard") -> str:
     """Return a supervisor system prompt focused on plan creation only."""
-    max_sq = _SUB_QUESTIONS_BY_DEPTH.get(depth, 4)
+    n_sq = _SUB_QUESTIONS_BY_DEPTH.get(depth, 4)
     return (
         "You are the Supervisor of a multi-agent research system.\n"
         "Your ONLY job in this call is to create the initial research plan.\n\n"
@@ -39,7 +48,14 @@ def _build_system_prompt(depth: str = "standard") -> str:
         "  industry  -- prioritises real-world deployment and case studies\n"
         "  skeptic   -- actively seeks counter-evidence and known failure modes\n"
         "  benchmark -- seeks quantitative comparisons and empirical metrics\n\n"
-        f"Generate AT MOST {max_sq} sub-questions (depth = {depth!r}).\n"
+        f"Generate EXACTLY {n_sq} sub-questions (depth = {depth!r}).\n"
+        "If the topic asks to compare, contrast, or evaluate differences between two or "
+        "more named things (e.g. \"X vs Y\", \"differences between A and B\"), your "
+        "sub-questions MUST cover each thing individually AND their direct comparison -- "
+        "never collapse a comparison topic into sub-questions about only one side. For "
+        "shallow depth (a single sub-question), phrase that one question to address the "
+        "comparison directly (e.g. \"How do X and Y differ in Z?\") rather than "
+        "researching only one of the things being compared.\n"
         "Assign a worker role to each sub-question based on the angle that best answers it.\n"
         "For shallow depth, always use role 'general'.\n"
         "Set complexity_score 0.0–1.0 (0 = single-fact, 1 = deep multi-faceted).\n\n"
