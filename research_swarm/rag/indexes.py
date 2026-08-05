@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 
 import chromadb
 from llama_index.core import SummaryIndex, VectorStoreIndex
@@ -42,6 +43,23 @@ def get_embed_model() -> HuggingFaceEmbedding:
     model = HuggingFaceEmbedding(**kwargs)
     logger.info("Embed model loaded.")
     return model
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Return the cosine similarity of two embedding vectors, or 0.0 if either is zero-magnitude.
+
+    Single shared implementation -- this same handful of lines was
+    independently reimplemented in agents/researcher.py, graph/stop.py, and
+    eval/faithfulness.py (each computing cosine similarity against BGE
+    embeddings from get_embed_model above), so a numerical-stability tweak
+    applied to one copy would silently miss the other two.
+    """
+    dot = sum(x * y for x, y in zip(a, b))
+    mag_a = math.sqrt(sum(x * x for x in a))
+    mag_b = math.sqrt(sum(x * x for x in b))
+    if mag_a == 0 or mag_b == 0:
+        return 0.0
+    return dot / (mag_a * mag_b)
 
 
 # ---------------------------------------------------------------------------

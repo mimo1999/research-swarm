@@ -19,7 +19,6 @@ Public API::
 from __future__ import annotations
 
 import logging
-import math
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,15 +30,6 @@ logger = logging.getLogger(__name__)
 # Minimum average cosine similarity between a section body and its cited
 # source snippets.  Below this the section is considered under-grounded.
 FAITHFULNESS_THRESHOLD = 0.25
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0 or mag_b == 0:
-        return 0.0
-    return dot / (mag_a * mag_b)
 
 
 def _embed(texts: list[str]) -> list[list[float]]:
@@ -65,35 +55,32 @@ def score_section(body: str, snippets: list[str]) -> float:
         logger.warning("Faithfulness embedding failed: %s — skipping check.", exc)
         return 0.5
 
+    from research_swarm.rag.indexes import cosine_similarity
+
     body_emb = embeddings[0]
     snippet_embs = embeddings[1:]
-    sims = [_cosine(body_emb, s) for s in snippet_embs]
+    sims = [cosine_similarity(body_emb, s) for s in snippet_embs]
     return sum(sims) / len(sims)
 
 
-def score_report(
+def score_sections(
     report: FinalReport,
     evidence_pool: list[Source],
-) -> float:
-    """Return the mean faithfulness score across all sections with citations.
+) -> list[dict]:
+    """Return per-section faithfulness detail for every citable section.
 
-    Sections without citations are excluded from the average (they cannot be
-    checked).  If no section has citations, returns 1.0 (nothing to check).
-
-    Args:
-        report:        The generated FinalReport.
-        evidence_pool: All Source objects available to the writer (used to
-                       look up snippet text for each citation index).
-
-    Returns:
-        Float in [0, 1].  Lower = more likely to contain unsupported claims.
+    Sections without citations are excluded (they cannot be checked). Each
+    entry is ``{"heading": str, "score": float, "citations": list[int]}`` --
+    this is what lets a caller identify *which* sections are under-grounded
+    instead of only the report-wide average, so a rewrite pass can target the
+    actual problem rather than blindly regenerating everything.
     """
     ref_snippets: dict[int, str] = {
         i + 1: (r.snippet if hasattr(r, "snippet") else r.get("snippet", ""))
         for i, r in enumerate(evidence_pool)
     }
 
-    scores: list[float] = []
+    out: list[dict] = []
     for section in getattr(report, "sections", []):
         citations = getattr(section, "citations", []) or []
         if not citations:
@@ -103,15 +90,34 @@ def score_report(
             body=getattr(section, "body_md", ""),
             snippets=snippets,
         )
-        scores.append(s)
-        logger.debug(
-            "Faithfulness[%s]: %.3f (citations=%s)",
-            getattr(section, "heading", "?")[:40],
-            s,
-            citations,
-        )
+        out.append({
+            "heading": getattr(section, "heading", "?"),
+            "score": s,
+            "citations": citations,
+        })
+        logger.debug("Faithfulness[%s]: %.3f (citations=%s)", out[-1]["heading"][:40], s, citations)
 
+    return out
+
+
+def score_report(
+    report: FinalReport,
+    evidence_pool: list[Source],
+) -> float:
+    """Return the mean faithfulness score across all sections with citations.
+
+    If no section has citations, returns 1.0 (nothing to check). See
+    ``score_sections`` for per-section detail.
+
+    Args:
+        report:        The generated FinalReport.
+        evidence_pool: All Source objects available to the writer (used to
+                       look up snippet text for each citation index).
+
+    Returns:
+        Float in [0, 1].  Lower = more likely to contain unsupported claims.
+    """
+    scores = [s["score"] for s in score_sections(report, evidence_pool)]
     if not scores:
         return 1.0
-
     return sum(scores) / len(scores)

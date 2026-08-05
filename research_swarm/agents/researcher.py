@@ -24,9 +24,14 @@ logger = logging.getLogger(__name__)
 
 # Tool-turn limits per depth level.  Each turn is one LLM call, so this is
 # the dominant factor in per-sub-question latency with slow cloud models.
+# standard reverted 4 -> 3: raising it (alongside more sub-questions) pushed
+# a live run's LLM-call usage to 49 against a 40 budget, exhausting the
+# shared budget before critic/fact-checker/writer ran. Combined with the
+# separate research/review budget pools (runtime/budget.py), this keeps
+# per-worker cost predictable instead of relying on the budget cap to save it.
 _TOOL_TURNS_BY_DEPTH: dict[str, int] = {
     "shallow":  1,   # single search call, no follow-up fetches
-    "standard": 4,   # balanced
+    "standard": 3,   # balanced
     "deep":     6,   # thorough: original behaviour
 }
 MAX_TOOL_TURNS = _TOOL_TURNS_BY_DEPTH["standard"]  # module-level fallback
@@ -80,7 +85,10 @@ Available tools:
   arxiv_search      -- search arXiv preprints (physics/CS/math -- NOT biomedical)
   pubmed_search     -- search PubMed (biomedical/clinical/life-sciences literature)
   fetch_url         -- fetch and extract text from a URL
-  retrieve_from_rag -- query documents already ingested into the session RAG index
+  retrieve_from_rag -- query evidence already discovered by earlier rounds of THIS
+                       research session (NOT user-uploaded documents -- those were
+                       already extracted into findings before research began, so
+                       check the existing findings for that, not this tool)
 
 Strategy ({depth} mode):
 {strategy}
@@ -95,7 +103,9 @@ _STRATEGY_SHALLOW = """\
 3. Synthesise immediately from the search results."""
 
 _STRATEGY_DEFAULT = """\
-1. Start with retrieve_from_rag to check if the answer is already in the session corpus.
+1. Start with retrieve_from_rag to check if an earlier round of this session already
+   found evidence for this (it will NOT contain user-uploaded documents -- those are
+   already reflected in the existing findings, not in this tool).
 2. Use web_search for fresh information. For medical/clinical/biological
    questions use pubmed_search; for CS/physics/math questions use
    arxiv_search -- arxiv_search barely indexes biomedical literature, and
@@ -298,28 +308,34 @@ async def _rank_sources_by_relevance(
     on exactly the case this needs to handle. BGE is already used elsewhere
     in this project for this exact kind of long-question semantic matching
     (graph/stop.py, eval/faithfulness.py).
+
+    The embedding work is CPU-bound (HuggingFace inference), so it's offloaded
+    to a thread via asyncio.to_thread -- this runs once per worker's synthesis
+    step, and workers execute concurrently as LangGraph Send-fanned tasks
+    sharing one event loop; without to_thread this call would block that
+    shared loop and silently serialize what's supposed to be parallel
+    dispatch. All sources are embedded in a single batched call rather than
+    one embedding call per source, for the same reason _ingest_round_evidence
+    batches its Chroma writes -- N sequential model calls where one suffices.
     """
     if len(sources) <= top_k:
         return sources
 
-    try:
-        from research_swarm.rag.indexes import get_embed_model
+    def _compute() -> list[Source]:
+        from research_swarm.rag.indexes import cosine_similarity, get_embed_model
         model = get_embed_model()
-
-        def _cosine(a: list[float], b: list[float]) -> float:
-            import math
-            dot = sum(x * y for x, y in zip(a, b))
-            mag_a = math.sqrt(sum(x * x for x in a))
-            mag_b = math.sqrt(sum(x * x for x in b))
-            return dot / (mag_a * mag_b) if mag_a and mag_b else 0.0
-
         q_emb = model.get_text_embedding(sub_question)
-        scored = [
-            (_cosine(q_emb, model.get_text_embedding(f"{s.title}\n{s.snippet}".strip() or s.url)), s)
-            for s in sources
-        ]
-        scored.sort(key=lambda x: x[0], reverse=True)
+        texts = [f"{s.title}\n{s.snippet}".strip() or s.url for s in sources]
+        embeddings = model.get_text_embedding_batch(texts)
+        scored = sorted(
+            zip((cosine_similarity(q_emb, e) for e in embeddings), sources),
+            key=lambda x: x[0],
+            reverse=True,
+        )
         return [s for _, s in scored[:top_k]]
+
+    try:
+        return await asyncio.to_thread(_compute)
     except Exception as exc:
         logger.warning(
             "Source relevance ranking failed (%s) -- keeping first %d in original order.",

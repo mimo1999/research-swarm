@@ -87,6 +87,71 @@ def test_report_quality_score_overall_all_one():
     assert score.overall == 1.0
 
 
+def test_report_quality_score_relevance_and_completeness_default_to_none():
+    """Nothing in the codebase computes relevance/completeness yet -- only
+    faithfulness is. They must default to None ("not computed"), not 0.0,
+    since a 0.0 default is indistinguishable from "computed and genuinely
+    zero" and previously made every report show a misleading 0% badge."""
+    score = ReportQualityScore(faithfulness=0.9)
+    assert score.relevance is None
+    assert score.completeness is None
+
+
+def test_report_quality_score_overall_ignores_uncomputed_dimensions():
+    """overall must average only the dimensions actually computed --
+    treating an uncomputed None as 0.0 would deflate a good report's score
+    (0.9 faithfulness alone used to report overall=0.3, not 0.9)."""
+    score = ReportQualityScore(faithfulness=0.9)
+    assert score.overall == 0.9
+
+
+def test_report_quality_score_overall_none_when_nothing_computed():
+    score = ReportQualityScore()
+    assert score.overall == 0.0
+
+
+class TestNextAgentReducer:
+    """next_agent must tolerate >=1 concurrent writes within one LangGraph
+    step without raising -- e.g. several Send-fanned worker_node/
+    document_worker_node branches each independently hitting an exhausted
+    budget and returning {"next_agent": "writer", ...} in the same step."""
+
+    def test_last_value_returns_the_new_value(self):
+        from research_swarm.schemas.state import _last_value
+
+        assert _last_value("dispatch", "writer") == "writer"
+        assert _last_value(None, "writer") == "writer"
+
+    def test_concurrent_identical_writes_do_not_raise(self):
+        """Reproduces the real failure shape via LangGraph's own channel
+        machinery: BinaryOperatorAggregate.update() is what a Send fan-out's
+        simultaneous writes actually go through. Before adding the reducer,
+        next_agent was a plain LastValue channel, which raises
+        InvalidUpdateError whenever len(values) != 1 in a single update()
+        call -- regardless of whether the values are equal."""
+        from langgraph.channels.binop import BinaryOperatorAggregate
+
+        from research_swarm.schemas.state import AgentName, _last_value
+
+        channel: BinaryOperatorAggregate = BinaryOperatorAggregate(
+            AgentName | None, _last_value,
+        )
+        # Two (or more) concurrent branches writing the same value in one step.
+        channel.update(["writer", "writer", "writer"])
+        assert channel.get() == "writer"
+
+    def test_concurrent_writes_take_the_last_value(self):
+        from langgraph.channels.binop import BinaryOperatorAggregate
+
+        from research_swarm.schemas.state import AgentName, _last_value
+
+        channel: BinaryOperatorAggregate = BinaryOperatorAggregate(
+            AgentName | None, _last_value,
+        )
+        channel.update(["dispatch", "critic"])
+        assert channel.get() == "critic"
+
+
 def test_final_report_quality_optional():
     report = FinalReport(
         title="Test Report",

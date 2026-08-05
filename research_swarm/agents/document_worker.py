@@ -105,6 +105,32 @@ def _split_into_parts(text: str, max_chars: int = MAX_DOC_CHARS) -> list[str]:
     return parts or [text]
 
 
+def _finding_id(doc_url: str, canonical_sub_question: str) -> str:
+    """Return a stable Finding id for (document, sub-question), or a random
+    one if the document has no URL to key on.
+
+    Every part of a document is dispatched as an independent Send-fanned
+    document_worker_node call in the same graph step (route_from_document_pass
+    fans out all documents' parts together, before round 0) -- there is no
+    prior-round state to look up an existing finding's id against the way
+    researcher.py/workers.py do for re-research, since nothing has merged yet
+    within that same step. Without this, two parts of one oversized document
+    that both address the same sub-question produce two separate Finding
+    objects that both survive _merge_findings (merge-by-id) instead of one.
+    A deterministic id (uuid5, keyed on url+sub-question) makes two such
+    parts collide into a single finding the same reducer already collapses
+    duplicate ids into, at the cost of arbitrarily picking whichever part's
+    output the merge processes last rather than reconciling both -- an
+    acceptable tradeoff given cross-part synthesis is already out of scope
+    (see _split_into_parts). A document with no URL can't be deduped this
+    way, so it falls back to a fresh id per finding as before.
+    """
+    if not doc_url:
+        return str(uuid.uuid4())
+    key = f"{doc_url}|{canonical_sub_question.strip().lower()}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+
+
 async def run_document_worker(
     document: dict,
     part_index: int,
@@ -150,6 +176,8 @@ async def run_document_worker(
             return []
         result = recovered
 
+    doc_url = document.get("url", "")
+
     findings: list[Finding] = []
     for item in result.items:
         canonical_sq = sub_q_lookup.get(item.sub_question.strip().lower())
@@ -160,12 +188,12 @@ async def run_document_worker(
             )
             continue
         findings.append(Finding(
-            id=str(uuid.uuid4()),
+            id=_finding_id(doc_url, canonical_sq),
             claim=item.claim,
             confidence=item.confidence,
             sub_question=canonical_sq,
             evidence=[Source(
-                url=document.get("url", ""),
+                url=doc_url,
                 title=document.get("title", ""),
                 snippet=item.quote or part_text[:2000],
                 source_type=document.get("source_type", SourceType.pdf),

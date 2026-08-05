@@ -114,8 +114,16 @@ async def _ingest_round_evidence(state: AgentState, findings: list) -> None:
         logger.warning("Collect: evidence ingestion failed (%s) -- continuing.", exc)
 
 
-def _get_tiered_state_llm(state: AgentState, tier: str):
+def _get_tiered_state_llm(state: AgentState, tier: str, pool: str = "research"):
     """Create a tiered LLM with budget callback attached.
+
+    ``pool`` selects which of the session's two independent budget counters
+    this call draws from -- "research" (supervisor, document workers,
+    dispatch/worker loop -- the part that can genuinely iterate) or "review"
+    (critic/fact-checker/writer/judge -- a few batched calls). Kept separate
+    so a research-loop overrun can't exhaust the budget critic/fact-checker/
+    writer need to turn already-gathered findings into a real report. See
+    runtime/budget.py.
 
     For the 'standard' (worker) tier, the session's user-selected provider
     overrides the static tier config -- so picking Anthropic/OpenAI in the UI
@@ -134,15 +142,17 @@ def _get_tiered_state_llm(state: AgentState, tier: str):
     with_structured_output/bind_tools operate on `self` itself, not a wrapper.
     """
     session_id = state.get("session_id", "default")
-    budget = get_budget(session_id)
+    budget = get_budget(session_id, pool=pool)
     provider_override = state.get("model_provider") if tier == "standard" else None
     llm = get_tiered_llm(tier=tier, provider_override=provider_override)
     return llm.model_copy(update={"callbacks": [budget.callback]})
 
 
-def _check_budget(state: AgentState, node_name: str) -> dict[str, Any] | None:
+def _check_budget(
+    state: AgentState, node_name: str, pool: str = "research",
+) -> dict[str, Any] | None:
     session_id = state.get("session_id", "default")
-    budget = get_budget(session_id)
+    budget = get_budget(session_id, pool=pool)
     try:
         budget.check()
         return None
@@ -152,8 +162,8 @@ def _check_budget(state: AgentState, node_name: str) -> dict[str, Any] | None:
             "next_agent": "writer",
             "messages": [
                 AIMessage(
-                    content=f"[{node_name}] Budget exceeded ({exc.used}/{exc.limit} calls); "
-                            "forcing report."
+                    content=f"[{node_name}] Budget exceeded ({exc.used}/{exc.limit} "
+                            f"{exc.pool} calls); forcing report."
                 )
             ],
         }
@@ -190,23 +200,16 @@ def _research_targets(state: AgentState) -> list[str]:
         }
         return [sq for sq in plan.sub_questions if sq.strip().lower() not in already_has_finding]
 
-    from research_swarm.agents._utils import _latest_verdicts
-
-    critiques = state.get("critiques") or []
-    latest_verdicts = _latest_verdicts(critiques)
-    weak_or_refuted = {
-        fid for fid, v in latest_verdicts.items() if v in {"weak", "refuted"}
-    }
+    weak_or_refuted_sqs = _weak_or_refuted_sub_questions(state)
     rework_counts = state.get("rework_counts") or {}
     max_rework = settings.max_rework_attempts
 
     answered_sqs: set[str] = set()
     capped_sqs: set[str] = set()
     for f in findings:
-        sq  = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
-        fid = f.id if hasattr(f, "id") else f.get("id", "")
+        sq = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
         norm_sq = sq.strip().lower()
-        if fid not in weak_or_refuted:
+        if norm_sq not in weak_or_refuted_sqs:
             answered_sqs.add(norm_sq)
         elif rework_counts.get(norm_sq, 0) >= max_rework:
             capped_sqs.add(norm_sq)
@@ -216,6 +219,34 @@ def _research_targets(state: AgentState) -> list[str]:
         if sq.strip().lower() not in answered_sqs
         and sq.strip().lower() not in capped_sqs
     ]
+
+
+def _weak_or_refuted_sub_questions(state: AgentState) -> set[str]:
+    """Return normalized sub-questions whose latest finding was critiqued as weak or refuted.
+
+    Distinct from "has no finding at all": a sub-question that never got a
+    finding (a worker failure, or the mandatory round-0->round-1 loop that
+    always fires before critic ever runs -- see should_stop's "first round"
+    fallback) hasn't been rejected by anything, it just hasn't succeeded yet.
+    collect_node uses this set (not _research_targets' full return value,
+    which also includes findingless sub-questions) to increment
+    rework_counts, so a sub-question's max_rework_attempts budget isn't
+    partially spent by rounds that happened before any critique existed.
+    """
+    from research_swarm.agents._utils import _latest_verdicts
+
+    findings = state.get("findings") or []
+    critiques = state.get("critiques") or []
+    latest_verdicts = _latest_verdicts(critiques)
+    weak_or_refuted_ids = {fid for fid, v in latest_verdicts.items() if v in {"weak", "refuted"}}
+
+    result: set[str] = set()
+    for f in findings:
+        fid = f.id if hasattr(f, "id") else f.get("id", "")
+        if fid in weak_or_refuted_ids:
+            sq = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
+            result.add(sq.strip().lower())
+    return result
 
 
 def _depth_str(state: AgentState) -> str:
@@ -562,12 +593,15 @@ async def worker_node(state: AgentState) -> dict[str, Any]:
 async def collect_node(state: AgentState) -> dict[str, Any]:
     """Evaluate stop signal after a dispatch round; route to critic or re-dispatch.
 
-    Also records rework attempts: for any round beyond the first, the targets
-    ``_research_targets(state)`` just returned (still pre-increment here) are
-    exactly the sub-questions this round dispatched, so their rework_counts
-    get bumped by one. This runs before dispatch_node/route_from_dispatch see
-    the new counts for the *next* round, and after they saw the (unchanged)
-    counts for *this* round — so nothing drifts mid-round.
+    Also records rework attempts: for any round beyond the first, every
+    sub-question the critic actually flagged weak/refuted (see
+    ``_weak_or_refuted_sub_questions``) gets its rework_counts bumped by one
+    -- not every ``_research_targets(state)`` entry, which also includes
+    sub-questions with no finding at all (worker failure, or the mandatory
+    round-0->round-1 loop that always fires before critic ever runs). This
+    runs before dispatch_node/route_from_dispatch see the new counts for the
+    *next* round, and after they saw the (unchanged) counts for *this*
+    round — so nothing drifts mid-round.
     """
     from research_swarm.graph.stop import should_stop
 
@@ -582,10 +616,14 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
 
     new_rounds = research_rounds + 1
 
+    # Only sub-questions the critic actually flagged weak/refuted count
+    # against the rework budget -- not every _research_targets() entry, which
+    # also includes sub-questions with no finding at all (a worker failure,
+    # or the mandatory round-0->round-1 loop that fires before critic ever
+    # runs). See _weak_or_refuted_sub_questions.
     rework_counts = dict(state.get("rework_counts") or {})
     if research_rounds > 0:
-        for sq in _research_targets(state):
-            key = sq.strip().lower()
+        for key in _weak_or_refuted_sub_questions(state):
             rework_counts[key] = rework_counts.get(key, 0) + 1
 
     # Human feedback always overrides stop signal — more research requested.
@@ -641,10 +679,10 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
     only place next_agent="dispatch" gets set after critic runs, so
     route_from_critic just reads it.
     """
-    if (early := _check_budget(state, "Critic")):
+    if (early := _check_budget(state, "Critic", pool="review")):
         return early
     # Critic uses fast tier — structured extraction, not synthesis
-    llm = _get_tiered_state_llm(state, "fast")
+    llm = _get_tiered_state_llm(state, "fast", pool="review")
     new_critiques = await run_critic(state, llm)
     logger.info("Critic produced %d critique(s).", len(new_critiques))
 
@@ -690,9 +728,9 @@ async def critic_node(state: AgentState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def fact_checker_node(state: AgentState) -> dict[str, Any]:
-    if (early := _check_budget(state, "FactChecker")):
+    if (early := _check_budget(state, "FactChecker", pool="review")):
         return early
-    llm = _get_tiered_state_llm(state, "fast")
+    llm = _get_tiered_state_llm(state, "fast", pool="review")
     updated_findings = await run_fact_checker(state, llm)
     logger.info("FactChecker updated %d finding(s).", len(updated_findings))
     return {
@@ -710,35 +748,30 @@ async def fact_checker_node(state: AgentState) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def writer_node(state: AgentState) -> dict[str, Any]:
-    if _check_budget(state, "Writer"):
-        query = state.get("query")
-        from research_swarm.schemas import FinalReport
-        report = FinalReport(
-            title=f"Research Report: {query.topic if query else 'Topic'}",
-            exec_summary="Budget exceeded; report could not be completed.",
-        )
-        return {
-            "final_report": report,
-            "draft_report": report,
-            "writer_instructions": None,
-            "messages": [AIMessage(
-                content=f"[Writer] Budget exceeded — partial report: {report.title}",
-            )],
-        }
+    """Synthesise the final report.
 
+    Deliberately NOT gated by a budget check, unlike every other node --
+    this is the one call that turns whatever findings the research loop
+    managed to gather into the user-facing report. Skipping it in favour of
+    an empty "budget exceeded" placeholder would throw away real, already-
+    paid-for research the moment the (separate, smaller) review pool ran
+    dry, which is a worse outcome than just letting this one call through.
+    Only the *optional* LLM judge pass below stays budget-gated -- it's
+    supplementary, not the report itself.
+    """
     # Writer uses the thorough tier — synthesis quality matters most here
-    llm = _get_tiered_state_llm(state, "thorough")
+    llm = _get_tiered_state_llm(state, "thorough", pool="review")
     report = await run_writer(state, llm)
 
     if settings.llm_judge_enabled:
         session_id = state.get("session_id", "default")
-        budget = get_budget(session_id)
+        budget = get_budget(session_id, pool="review")
         try:
             budget.check()
         except BudgetExceeded:
             logger.info("Writer: skipping LLM judge — budget exhausted.")
         else:
-            judge_llm = _get_tiered_state_llm(state, settings.llm_judge_tier)
+            judge_llm = _get_tiered_state_llm(state, settings.llm_judge_tier, pool="review")
             query = state.get("query")
             plan = state.get("plan")
             judge_result = await judge_report(

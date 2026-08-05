@@ -5,10 +5,10 @@ import logging
 from typing import TYPE_CHECKING
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from research_swarm.agents._utils import _field, _latest_verdicts, schema_output_instruction
-from research_swarm.schemas import FinalReport, ReportSection, Source
+from research_swarm.schemas import FinalReport, ReportQualityScore, ReportSection, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
 if TYPE_CHECKING:
@@ -215,9 +215,29 @@ async def run_writer(
     # Uses embedding cosine similarity between section bodies and cited
     # source snippets; no extra LLM call for the check itself.
     # ------------------------------------------------------------------
-    report = await _faithfulness_rewrite(report, references, structured_llm, system_msg, user_msg)
+    report, faithfulness = await _faithfulness_rewrite(
+        report, references, structured_llm, system_msg, user_msg,
+    )
+    report = _attach_quality_score(report, faithfulness)
 
     return report
+
+
+def _attach_quality_score(report: FinalReport, faithfulness: float | None) -> FinalReport:
+    """Attach the faithfulness score _faithfulness_rewrite already computed.
+
+    Takes the score as a parameter instead of recomputing it: score_sections
+    embeds every section body and every cited snippet, and _faithfulness_
+    rewrite already ran that exact computation once (or twice, if a rewrite
+    fired) against the report this function receives -- rerunning it here was
+    a full extra embedding pass for no new information. None means
+    _faithfulness_rewrite couldn't compute a score (eval unavailable/failed);
+    in that case no quality_score is attached, same as before.
+    """
+    if faithfulness is None:
+        return report
+    quality_score = ReportQualityScore(faithfulness=faithfulness)
+    return report.model_copy(update={"quality_score": quality_score})
 
 
 async def _faithfulness_rewrite(
@@ -226,44 +246,70 @@ async def _faithfulness_rewrite(
     structured_llm,
     system_msg: SystemMessage,
     original_user_msg: HumanMessage,
-) -> FinalReport:
-    """Return *report* unchanged if faithfulness is acceptable; else rewrite once."""
+) -> tuple[FinalReport, float | None]:
+    """Return (report, faithfulness_score); rewrite once if the score is too low.
+
+    The rewrite call includes the report it's being asked to fix (as a prior
+    AI turn) and names the specific under-grounded sections. Without this, the
+    model has no way to know what it wrote or which part was flagged -- it
+    would just regenerate blind from the original findings, which is as
+    likely to reproduce the same gaps as fix them.
+
+    Returns the score alongside the report -- rather than just the report and
+    making the caller recompute it -- since this function already runs the
+    (section-body + cited-snippet) embedding pass to decide whether to
+    rewrite at all; the caller (run_writer, via _attach_quality_score) reuses
+    that same number instead of re-embedding everything from scratch.
+    ``None`` means the score couldn't be computed (eval unavailable/failed).
+    """
     try:
-        from research_swarm.eval.faithfulness import FAITHFULNESS_THRESHOLD, score_report
+        from research_swarm.eval.faithfulness import FAITHFULNESS_THRESHOLD, score_sections
     except ImportError:
-        return report  # eval not available — skip
+        return report, None  # eval not available — skip
 
     try:
-        faith_score = score_report(report, references)
+        section_scores = score_sections(report, references)
     except Exception as exc:
         logger.warning("Faithfulness scoring failed (%s) — skipping rewrite.", exc)
-        return report
+        return report, None
 
-    logger.info("Faithfulness score: %.3f (threshold=%.2f)", faith_score, FAITHFULNESS_THRESHOLD)
-    if faith_score >= FAITHFULNESS_THRESHOLD:
-        return report
-
-    logger.warning(
-        "Faithfulness %.3f < %.2f — requesting one rewrite pass.",
-        faith_score, FAITHFULNESS_THRESHOLD,
+    weak_sections = [s for s in section_scores if s["score"] < FAITHFULNESS_THRESHOLD]
+    overall = (
+        sum(s["score"] for s in section_scores) / len(section_scores)
+        if section_scores else 1.0
     )
+    logger.info("Faithfulness score: %.3f (threshold=%.2f)", overall, FAITHFULNESS_THRESHOLD)
+    if not weak_sections:
+        return report, overall
+
+    weak_headings = ", ".join(f"{s['heading']!r} ({s['score']:.2f})" for s in weak_sections)
+    logger.warning(
+        "Faithfulness %.3f < %.2f on %d section(s) [%s] — requesting targeted rewrite.",
+        overall, FAITHFULNESS_THRESHOLD, len(weak_sections), weak_headings,
+    )
+    previous_report_msg = AIMessage(content=report.model_dump_json())
     rewrite_msg = HumanMessage(
         content=(
-            f"The previous report scored {faith_score:.2f} on faithfulness "
-            f"(threshold {FAITHFULNESS_THRESHOLD}).  "
-            "Please rewrite it so that every claim is directly supported by the "
-            "cited source snippets.  Remove or qualify any claim that lacks "
-            "clear evidential support.  Return the full corrected report in the "
-            "same JSON format."
+            f"The report above scored below the faithfulness threshold "
+            f"({FAITHFULNESS_THRESHOLD}) on these section(s): {weak_headings}.  "
+            "Rewrite ONLY those sections so every claim is directly supported by "
+            "the cited source snippets from the evidence above -- remove or qualify "
+            "any claim that lacks clear support.  Leave all other sections exactly "
+            "as they are.  Return the full corrected report in the same JSON format."
         )
     )
     try:
         rewritten: FinalReport = await structured_llm.ainvoke(
-            [system_msg, original_user_msg, rewrite_msg]
+            [system_msg, original_user_msg, previous_report_msg, rewrite_msg]
         )
         rewritten = rewritten.model_copy(update={"references": references})
-        logger.info("Rewrite faithfulness: %.3f", score_report(rewritten, references))
-        return rewritten
+        rewritten_scores = score_sections(rewritten, references)
+        rewritten_overall = (
+            sum(s["score"] for s in rewritten_scores) / len(rewritten_scores)
+            if rewritten_scores else 1.0
+        )
+        logger.info("Rewrite faithfulness: %.3f", rewritten_overall)
+        return rewritten, rewritten_overall
     except Exception as exc:
         logger.warning("Faithfulness rewrite failed (%s) — keeping original.", exc)
-        return report
+        return report, overall

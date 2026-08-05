@@ -21,6 +21,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 
+from research_swarm.agents._utils import recover_from_parse_failure
 from research_swarm.agents.researcher import (
     _TOOL_TURNS_BY_DEPTH,
     MAX_TOOL_TURNS,
@@ -43,20 +44,38 @@ logger = logging.getLogger(__name__)
 # Role-specific strategy sections (embedded in the shared system prompt)
 # ---------------------------------------------------------------------------
 
-_STRATEGIES: dict[WorkerRole, str] = {
-    WorkerRole.general: """\
-1. Start with retrieve_from_rag to check the session corpus.
-2. Use web_search and arxiv_search for fresh information.
-3. Fetch 1-2 promising URLs for detail.
-4. Stop when you have 3-5 good sources.""",
+_DOMAIN_ROUTING_NOTE = """\
+Pick the right literature search for the topic's domain -- arxiv_search barely
+indexes biomedical/clinical/life-sciences literature (it's a physics/CS/math
+preprint server); pubmed_search is peer-reviewed biomedical/clinical/
+life-sciences literature and will not have CS/physics/math papers. Using the
+wrong one returns confidently-worded but topically irrelevant results, not an
+empty list -- check that a result is actually about the sub-question's subject
+before citing it, regardless of which tool it came from."""
 
-    WorkerRole.academic: """\
+_STRATEGIES: dict[WorkerRole, str] = {
+    WorkerRole.general: f"""\
+1. Start with retrieve_from_rag to check whether an earlier round of this
+   session already found evidence for this (uploaded documents are already
+   reflected in the existing findings, not in this tool -- see below).
+2. Use web_search for fresh information; add arxiv_search or pubmed_search
+   for the topic's domain (see below).
+3. Fetch 1-2 promising URLs for detail.
+4. Stop when you have 3-5 good sources.
+
+{_DOMAIN_ROUTING_NOTE}""",
+
+    WorkerRole.academic: f"""\
 You are the ACADEMIC worker. Prioritise peer-reviewed and pre-print sources.
-1. Use arxiv_search FIRST — this is an academic question.
-2. Check retrieve_from_rag for any ingested papers.
+1. For medical/clinical/biological questions, use pubmed_search FIRST.
+   For CS/physics/math/engineering questions, use arxiv_search FIRST.
+2. Check retrieve_from_rag for evidence an earlier round already found (NOT
+   uploaded papers -- those are already reflected in the existing findings).
 3. Use web_search only for supplementary context or DOI resolution.
-4. Cite specific paper titles, authors, or DOIs wherever possible.
-5. Flag if findings are preliminary (pre-print) vs peer-reviewed.""",
+4. Cite specific paper titles, authors, or DOIs/PMIDs wherever possible.
+5. Flag if findings are preliminary (pre-print) vs peer-reviewed.
+
+{_DOMAIN_ROUTING_NOTE}""",
 
     WorkerRole.industry: """\
 You are the INDUSTRY worker. Prioritise practical, real-world deployment evidence.
@@ -65,21 +84,29 @@ You are the INDUSTRY worker. Prioritise practical, real-world deployment evidenc
 3. Avoid purely theoretical sources; prefer concrete adoption metrics where available.
 4. Note the organisation behind each source to surface any potential bias.""",
 
-    WorkerRole.skeptic: """\
+    WorkerRole.skeptic: f"""\
 You are the SKEPTIC worker. Your job is to find weaknesses, counter-evidence, and
 known failure modes — NOT to confirm the mainstream view.
 1. Use web_search with terms like "criticism", "limitation", "failure", "critique", "drawback".
-2. Use arxiv_search with terms like "negative result", "limitations", "challenges".
+2. Use arxiv_search or pubmed_search (whichever fits the topic's domain -- see
+   below) with terms like "negative result", "limitations", "challenges".
 3. Specifically look for published replications that failed, or papers challenging
    key assumptions of the mainstream position.
-4. A finding that says "evidence against X is scarce" is valuable — report it explicitly.""",
+4. A finding that says "evidence against X is scarce" is valuable — report it explicitly.
 
-    WorkerRole.benchmark: """\
+{_DOMAIN_ROUTING_NOTE}""",
+
+    WorkerRole.benchmark: f"""\
 You are the BENCHMARK worker. Seek quantitative comparisons and empirical evidence.
 1. Use web_search with terms like "benchmark", "comparison", "performance", "evaluation".
-2. Use arxiv_search for papers with ablation studies, leaderboard results, or metric tables.
-3. Extract specific numbers: accuracy, latency, throughput, F1, BLEU, cost, etc.
-4. Report the benchmark name, dataset, and date so the reader can assess recency.""",
+2. Use arxiv_search or pubmed_search (whichever fits the topic's domain -- see
+   below) for papers with ablation studies, trial results, or metric tables.
+3. Extract specific numbers: accuracy, latency, throughput, F1, BLEU, cost,
+   effect sizes, confidence intervals, p-values, etc. Preserve exact figures --
+   do not round off or paraphrase a number into "improved" or "worse".
+4. Report the study name/dataset and date so the reader can assess recency.
+
+{_DOMAIN_ROUTING_NOTE}""",
 }
 
 _SYSTEM_TEMPLATE = """\
@@ -88,9 +115,12 @@ by calling the available tools, then synthesise your findings.
 
 Available tools:
   web_search        -- search the web (Tavily)
-  arxiv_search      -- search arXiv preprints
+  arxiv_search      -- search arXiv preprints (physics/CS/math -- NOT biomedical)
+  pubmed_search     -- search PubMed (biomedical/clinical/life-sciences literature)
   fetch_url         -- fetch and extract text from a URL
-  retrieve_from_rag -- query session RAG index
+  retrieve_from_rag -- query evidence found by earlier rounds of THIS session
+                       (NOT user-uploaded documents -- those are already in
+                       the existing findings, extracted before research began)
 
 Strategy ({depth} mode, {role} perspective):
 {strategy}
@@ -109,6 +139,7 @@ async def run_worker(
     state: AgentState,
     llm: BaseChatModel,
     tools: list[BaseTool],
+    summarizer_llm: BaseChatModel | None = None,
 ) -> Finding | None:
     """Research a single *sub_question* from the given *role* perspective.
 
@@ -154,9 +185,10 @@ async def run_worker(
         tool_map=tool_map,
         system_msg=system_msg,
         max_turns=max_turns,
+        summarizer_llm=summarizer_llm,
     )
 
-    sources = _extract_sources_from_messages(messages)
+    sources = await _extract_sources_from_messages(messages, sub_question=sub_question)
     logger.info("Worker[%s] extracted %d sources", role.value, len(sources))
 
     synthesis_messages = messages + [HumanMessage(content=_synthesis_prompt(sub_question))]
@@ -164,10 +196,18 @@ async def run_worker(
         synthesis: FindingSynthesis = await synthesis_llm.ainvoke(synthesis_messages)
     except Exception as exc:
         logger.warning("Worker[%s] synthesis failed for %r: %s", role.value, sub_question, exc)
-        synthesis = FindingSynthesis(
-            claim=f"[Research incomplete for: {sub_question}]",
-            confidence=0.2,
-        )
+        recovered = recover_from_parse_failure(exc, FindingSynthesis)
+        if recovered is not None:
+            logger.info(
+                "Worker[%s] recovered synthesis from malformed completion for %r",
+                role.value, sub_question,
+            )
+            synthesis = recovered
+        else:
+            synthesis = FindingSynthesis(
+                claim=f"[Research incomplete for: {sub_question}]",
+                confidence=0.2,
+            )
 
     # Reuse existing finding ID on re-research passes (merge-by-id reducer).
     existing_findings = state.get("findings") or []

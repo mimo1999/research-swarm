@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 
+from .judge import LLMJudgeResult
 from .source import Source
 
 
@@ -19,14 +20,20 @@ class ReportQualityScore(BaseModel):
         le=1.0,
         description="Fraction of claims supported by cited sources",
     )
-    relevance: float = Field(
-        default=0.0,
+    # relevance/completeness default to None, not 0.0 -- nothing in the
+    # codebase computes them yet (only faithfulness is). A 0.0 default looked
+    # identical to "computed and genuinely zero", so the UI rendered a
+    # misleading "Relevance: 0%" / "Completeness: 0%" for every report the
+    # moment writer.py started always attaching a quality_score. None means
+    # "not computed"; report_view.py shows that distinctly instead of a score.
+    relevance: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
         description="Average cosine similarity between sub-questions and sections",
     )
-    completeness: float = Field(
-        default=0.0,
+    completeness: float | None = Field(
+        default=None,
         ge=0.0,
         le=1.0,
         description="Fraction of sub-questions addressed in the report",
@@ -34,7 +41,19 @@ class ReportQualityScore(BaseModel):
 
     @property
     def overall(self) -> float:
-        return round((self.faithfulness + self.relevance + self.completeness) / 3, 3)
+        """Average of whichever dimensions have actually been computed.
+
+        Averaging in an uncomputed dimension as 0.0 would silently deflate
+        this score (e.g. faithfulness=0.9 with relevance/completeness
+        uncomputed used to report overall=0.3) -- only populated scores
+        count, so `overall` still means "how good are the dimensions we
+        actually measured", not "how many dimensions did we measure".
+        """
+        dims = (self.faithfulness, self.relevance, self.completeness)
+        scores = [s for s in dims if s is not None]
+        if not scores:
+            return 0.0
+        return round(sum(scores) / len(scores), 3)
 
 
 class FinalReport(BaseModel):
@@ -53,4 +72,7 @@ class FinalReport(BaseModel):
     )
     quality_score: ReportQualityScore | None = Field(
         default=None, description="Attached after eval phase"
+    )
+    llm_judge: LLMJudgeResult | None = Field(
+        default=None, description="Independent LLM review, attached after the writer runs"
     )

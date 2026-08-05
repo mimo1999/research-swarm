@@ -31,6 +31,24 @@ def _merge_findings(existing: list, new: list) -> list:
     return list(merged.values())
 
 
+def _last_value(existing, new):  # noqa: ARG001
+    """Reducer for next_agent: tolerate multiple writes within one step.
+
+    Without an Annotated reducer, next_agent is a plain LastValue channel,
+    which raises InvalidUpdateError the instant more than one write lands on
+    it in a single step -- even when every write carries the identical value.
+    That's exactly what happens when >=2 parallel worker_node/
+    document_worker_node branches (Send-fanned in the same step) each
+    independently detect the same exhausted budget pool and return
+    {"next_agent": "writer", ...}: a real, reproducible crash instead of the
+    intended graceful degrade. Last-write-wins is safe here because nothing
+    in this graph ever wants two *different* concurrent next_agent values to
+    both take effect -- routing is always one node's decision, so tolerating
+    concurrent writes (which in practice always agree) just removes the crash.
+    """
+    return new
+
+
 AgentName = Literal[
     "supervisor", "researcher", "critic", "writer", "fact_checker",
     "dispatch", "collect", "human", "end",
@@ -62,7 +80,11 @@ class AgentState(TypedDict):
 
     # Routing & control
     iteration_count: int
-    next_agent: AgentName | None
+    # Annotated with a reducer (not a plain LastValue field) so that
+    # >=1 concurrent Send-fanned branches writing the same value in one
+    # step (e.g. several workers all hitting an exhausted budget at once)
+    # don't crash the run -- see _last_value.
+    next_agent: Annotated[AgentName | None, _last_value]
 
     # Session identifier for persistence
     session_id: str

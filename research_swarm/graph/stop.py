@@ -24,7 +24,6 @@ The hard cap (``research_rounds >= max_rounds``) always wins.
 from __future__ import annotations
 
 import logging
-import math
 
 logger = logging.getLogger(__name__)
 
@@ -126,18 +125,11 @@ def _mean_claim_similarity(
         logger.debug("Embedding computation failed (%s) — skipping similarity check.", exc)
         return None
 
+    from research_swarm.rag.indexes import cosine_similarity
+
     sims: list[float] = []
     for ne in new_embs:
         for ee in ex_embs:
-            sims.append(_cosine(ne, ee))
+            sims.append(cosine_similarity(ne, ee))
 
     return sum(sims) / len(sims) if sims else None
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot   = sum(x * y for x, y in zip(a, b))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0 or mag_b == 0:
-        return 0.0
-    return dot / (mag_a * mag_b)

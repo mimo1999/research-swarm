@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class SourceType(StrEnum):
     web = "web"
     arxiv = "arxiv"
+    pubmed = "pubmed"
     pdf = "pdf"
     retriever = "retriever"
 

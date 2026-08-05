@@ -233,4 +233,9 @@ async def run(topic: str, depth: str = "shallow", model_name: str | None = None)
 
 if __name__ == "__main__":
     topic = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else "transformer attention mechanisms"
-    asyncio.run(run(topic, model_name="gemma4:e2b"))
+    # No model_name override -- uses settings.default_model_name so this stays
+    # in sync with the configured default instead of hardcoding a model string
+    # that can silently drift out of sync with what's actually pulled locally
+    # (this line previously hardcoded "gemma4:e2b", which is no longer a valid
+    # local Ollama tag and 404'd on every call).
+    asyncio.run(run(topic))

@@ -206,6 +206,141 @@ class TestArxivSearch:
             mock_pdf.assert_not_called()
 
 
+# ── pubmed_search ────────────────────────────────────────────────────────────
+
+_EFETCH_XML_TEMPLATE = """\
+<?xml version="1.0"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>{pmid}</PMID>
+      <Article>
+        <ArticleTitle>{title}</ArticleTitle>
+        <Abstract>
+          <AbstractText>{abstract}</AbstractText>
+        </Abstract>
+        <Journal><Title>{journal}</Title></Journal>
+      </Article>
+    </MedlineCitation>
+    <PubDate><Year>{year}</Year></PubDate>
+    <PubmedData>
+      <History>
+        <PubMedPubDate><Year>{year}</Year></PubMedPubDate>
+      </History>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+
+
+def _mock_esearch_response(pmids: list[str]) -> MagicMock:
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {"esearchresult": {"idlist": pmids}}
+    return resp
+
+
+def _mock_efetch_response(xml: str) -> MagicMock:
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.content = xml.encode("utf-8")
+    return resp
+
+
+class TestPubmedSearch:
+    @patch("research_swarm.tools.pubmed_tool.httpx.get")
+    def test_returns_list_of_source_dicts(self, mock_get):
+        xml = _EFETCH_XML_TEMPLATE.format(
+            pmid="12345", title="GLP-1 in Parkinson's Disease",
+            abstract="A phase 2 trial found improvement.", journal="Lancet", year="2025",
+        )
+        mock_get.side_effect = [
+            _mock_esearch_response(["12345"]),
+            _mock_efetch_response(xml),
+        ]
+
+        from research_swarm.tools.pubmed_tool import pubmed_search
+        result = pubmed_search.invoke({"query": "GLP-1 Parkinson's disease", "max_results": 1})
+
+        assert len(result) == 1
+        src = result[0]
+        assert src["source_type"] == SourceType.pubmed.value
+        assert src["url"] == "https://pubmed.ncbi.nlm.nih.gov/12345"
+        assert "GLP-1 in Parkinson's Disease" in src["title"]
+        assert "improvement" in src["snippet"]
+        assert src["credibility_score"] == 0.9
+
+    @patch("research_swarm.tools.pubmed_tool.httpx.get")
+    def test_empty_esearch_results_returns_no_results_placeholder(self, mock_get):
+        mock_get.side_effect = [_mock_esearch_response([])]
+
+        from research_swarm.tools.pubmed_tool import pubmed_search
+        result = pubmed_search.invoke({"query": "an extremely obscure query"})
+
+        assert len(result) == 1
+        assert result[0]["source_type"] == SourceType.pubmed.value
+        assert result[0]["credibility_score"] == 0.0
+
+    @patch("research_swarm.tools.pubmed_tool.httpx.get")
+    def test_articles_without_abstract_are_skipped(self, mock_get):
+        # e.g. letters/errata: PMID present but no <AbstractText>
+        xml = """\
+<?xml version="1.0"?>
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>999</PMID>
+      <Article>
+        <ArticleTitle>Erratum</ArticleTitle>
+        <Journal><Title>Lancet</Title></Journal>
+      </Article>
+    </MedlineCitation>
+  </PubmedArticle>
+</PubmedArticleSet>
+"""
+        mock_get.side_effect = [
+            _mock_esearch_response(["999"]),
+            _mock_efetch_response(xml),
+        ]
+
+        from research_swarm.tools.pubmed_tool import pubmed_search
+        result = pubmed_search.invoke({"query": "test"})
+
+        # No usable abstract -- falls through to the "no results" placeholder,
+        # not a Source built from an empty snippet.
+        assert len(result) == 1
+        assert result[0]["credibility_score"] == 0.0
+
+    @patch("research_swarm.tools.pubmed_tool.httpx.get")
+    def test_network_error_returns_error_placeholder(self, mock_get):
+        mock_get.side_effect = Exception("connection reset")
+
+        from research_swarm.tools.pubmed_tool import pubmed_search
+        result = pubmed_search.invoke({"query": "test"})
+
+        assert len(result) == 1
+        assert result[0]["credibility_score"] == 0.0
+        assert "Search error" in result[0]["snippet"]
+
+    @patch("research_swarm.tools.pubmed_tool.httpx.get")
+    def test_ncbi_api_key_forwarded_when_configured(self, mock_get):
+        from research_swarm.config import settings
+        mock_get.side_effect = [_mock_esearch_response([])]
+
+        original = settings.ncbi_api_key
+        try:
+            from pydantic import SecretStr
+            settings.ncbi_api_key = SecretStr("test-key-123")
+
+            from research_swarm.tools.pubmed_tool import pubmed_search
+            pubmed_search.invoke({"query": "test"})
+
+            call_kwargs = mock_get.call_args.kwargs
+            assert call_kwargs["params"]["api_key"] == "test-key-123"
+        finally:
+            settings.ncbi_api_key = original
+
+
 # ── url_fetcher ───────────────────────────────────────────────────────────────
 
 class TestURLFetcher:

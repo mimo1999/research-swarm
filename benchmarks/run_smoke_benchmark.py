@@ -16,6 +16,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
+from research_swarm.agents.base import get_agent_llm
 from research_swarm.config import settings
 from research_swarm.eval.faithfulness import score_report
 from research_swarm.graph.builder import build_graph, get_thread_config
@@ -256,6 +257,7 @@ async def run_task(
     timeout: float,
     model_provider: str = "ollama",
     model_name: str = "minimax-m2.5:cloud",
+    worker_model: str | None = None,
 ) -> dict[str, Any]:
     session_id = f"bench-{task.id}-{uuid.uuid4().hex[:6]}"
     started = time.perf_counter()
@@ -264,6 +266,7 @@ async def run_task(
         "dataset": task.dataset,
         "status": "error",
         "model": model_name,
+        "worker_model": worker_model or model_name,
     }
     try:
         chunks = await asyncio.to_thread(_ingest_task, task, session_id)
@@ -317,6 +320,7 @@ def _write_summary(path: Path, results: list[dict[str, Any]], elapsed: float) ->
     summary = {
         "seed": SEED,
         "model": results[0].get("model", "") if results else "",
+        "worker_model": results[0].get("worker_model", "") if results else "",
         "tasks": len(results),
         "successful": len(successful),
         "status_counts": dict(Counter(row["status"] for row in results)),
@@ -362,27 +366,51 @@ def _write_summary(path: Path, results: list[dict[str, Any]], elapsed: float) ->
 async def main(args: argparse.Namespace) -> None:
     model_provider = "ollama"
     model_name = args.model
+    # --worker-model lets the "standard" (worker) tier run a different, cheaper
+    # model than the rest of the pipeline -- omit it for the old uniform-model
+    # comparison mode (every tier on --model).
+    worker_model = args.worker_model or model_name
     settings.default_model_provider = model_provider
     settings.default_model_name = model_name
     settings.tier_fast_provider = model_provider
     settings.tier_fast_model = model_name
     settings.tier_standard_provider = model_provider
-    settings.tier_standard_model = model_name
+    settings.tier_standard_model = worker_model
     settings.tier_thorough_provider = model_provider
     settings.tier_thorough_model = model_name
     settings.max_sources = 5
     settings.max_llm_calls = 12
 
     # Keep benchmark retrieval deterministic and avoid an extra LLM inside LlamaIndex.
+    #
+    # query_engines.probe_ollama() caches its result for only 60s. The old
+    # one-time `_ollama_probe_cache = (False, ...)` assignment expired mid-run
+    # on any benchmark run longer than 60s (this one takes minutes), after
+    # which a live probe found Ollama reachable and later tasks silently
+    # switched to LlamaIndex's SubQuestionQueryEngine routing path -- which
+    # returns zero evidence, corrupting grounded_rate/faithfulness for
+    # whichever tasks happened to run after the flip. Patch the function
+    # itself so it stays disabled for the entire run, not just 60s of it.
     import research_swarm.graph.nodes as nodes
     import research_swarm.rag.query_engines as query_engines
 
-    query_engines._ollama_probe_cache = (False, time.monotonic())
+    query_engines.probe_ollama = lambda: False
     nodes._get_researcher_tools = lambda max_sources=None, session_id=None: [
         build_retriever_tool(max_sources=max_sources, session_id=session_id)
     ]
 
-    print(f"MODEL  {model_provider}/{model_name}", flush=True)
+    # get_tiered_llm now auto-picks a cheaper model for the "standard" (worker)
+    # tier in production, which defeats a uniform-model comparison run. Replace
+    # it with an explicit mapping instead: every tier uses --model, except
+    # "standard" which uses --worker-model (same as --model when omitted, i.e.
+    # true uniform mode).
+    def _uniform_tiered_llm(tier, temperature=0.0, provider_override=None):
+        model = worker_model if tier == "standard" else model_name
+        return get_agent_llm(provider=model_provider, model=model, temperature=temperature)
+
+    nodes.get_tiered_llm = _uniform_tiered_llm
+
+    print(f"MODEL  {model_provider}/{model_name}  (worker tier: {worker_model})", flush=True)
     tasks = build_tasks(args.limit)
     RESULTS_ROOT.mkdir(parents=True, exist_ok=True)
     run_id = time.strftime("%Y%m%d-%H%M%S")
@@ -398,10 +426,10 @@ async def main(args: argparse.Namespace) -> None:
     write_lock = asyncio.Lock()
     started = time.perf_counter()
 
-    async def guarded(task: BenchmarkTask, mp: str, mn: str) -> None:
+    async def guarded(task: BenchmarkTask, mp: str, mn: str, wm: str) -> None:
         async with semaphore:
             print(f"START {task.id}", flush=True)
-            result = await run_task(task, args.timeout, mp, mn)
+            result = await run_task(task, args.timeout, mp, mn, worker_model=wm)
             async with write_lock:
                 results.append(result)
                 with results_path.open("a", encoding="utf-8") as handle:
@@ -413,7 +441,7 @@ async def main(args: argparse.Namespace) -> None:
             )
 
     await asyncio.gather(*(
-        guarded(task, model_provider, model_name) for task in tasks
+        guarded(task, model_provider, model_name, worker_model) for task in tasks
     ))
     elapsed = time.perf_counter() - started
     _write_summary(summary_path, results, elapsed)
@@ -428,6 +456,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--model", type=str, default="gemma4:31b-cloud",
                         help="Ollama model name (e.g. minimax-m2.5:cloud)")
+    parser.add_argument("--worker-model", type=str, default=None,
+                        help="Model for the 'standard' (worker) tier only -- "
+                             "supervisor/critic/fact-checker/writer stay on --model. "
+                             "Omit for uniform mode (every tier on --model).")
     return parser.parse_args()
 
 
