@@ -2,228 +2,197 @@
 
 ## Project Overview
 
-**Research Swarm** is a production-grade autonomous research system built on LangGraph, LlamaIndex, and Streamlit. It orchestrates five AI agents to autonomously plan, research, critique, fact-check, and write structured reports on any topic — with optional human review.
+**Research Swarm** is a production-grade autonomous research system built on LangGraph, LlamaIndex, and Streamlit. It orchestrates a swarm of AI agents to autonomously plan, research (live web/arXiv/PubMed search *and* directly-ingested documents), critique, fact-check, and write structured reports on any topic — with optional human review.
 
 **GitHub:** https://github.com/mimo1999/research-swarm
 
 ---
 
-## Key Accomplishment: Bug Fix Session (157 Tests Passing)
+## Key Accomplishment: RAG/Retrieval Overhaul and Reliability Hardening (348 Tests Passing)
 
-This document summarizes a comprehensive bug-fix and refactoring session that resolved 8 critical issues across routing, security, RAG, HITL, and persistence layers.
+This document summarizes a session that replaced the retrieval stack, added a document-extraction pipeline that bypasses vector search entirely for uploaded files, split the LLM budget so a research-loop overrun can no longer produce an empty report, and fixed a batch of correctness issues surfaced by a full code review and repeated live test runs.
 
 ### Starting State
-- 8 test failures (149 passing)
-- Infinite fact_checker loop due to hard iteration cap in supervisor_node
-- Graph error: `'\n "claim"'` from JSON braces in format string
-- `@st.cache_resource` serving stale compiled graph after code changes
-- SSRF vulnerabilities (string-prefix blocklist missing hex/decimal/IPv6 variants)
-- TavilyClient module singleton leaking between tests
-- RAG helpers duplicated between ingestion.py and indexes.py
-- Separate HITL feedback channels not implemented (writer and researcher feedback conflicted)
-- SQLite commit failures when writes table didn't exist
+- 181 tests passing, single shared LLM-call budget
+- Reranker: `cross-encoder/ms-marco-MiniLM-L-6-v2`
+- Uploaded PDFs/URLs chunked, embedded, and retrieved via `retrieve_from_rag` like any other RAG content
+- No JSON-repair path for structured-output parse failures
+- No document-level extraction path — everything routed through the live web-search worker loop
 
 ### Final State
-- **All 157 tests passing**
-- All routing loops fixed
-- SSRF protection hardened with ipaddress module
-- Dual HITL feedback channels (human_feedback → Researcher, writer_instructions → Writer)
-- Clean RAG consolidation into `rag/_chroma.py`
-- Proper two-phase SQLite commits in delete_session
-- Code-hash cache busting for Streamlit
-- All modules documented and documented in README
+- **All 348 tests passing**
+- Reranker swapped to `BAAI/bge-reranker-base`, benchmarked against 4 candidates on BEIR
+- Ingested documents extracted directly into findings — no chunk/embed/retrieve step
+- Dual budget pools (research / review) so the writer always produces a report
+- Supervisor generates an *exact* sub-question count and is required to cover every side of a comparison topic
+- JSON-repair recovers structured-output failures caused by unescaped LaTeX backslashes
+- A concurrent-write crash in the graph (`InvalidUpdateError` on simultaneous budget-exceeded branches) fixed via a proper reducer
+- Critic/fact-checker batched and parallelized; duplicate embedding passes removed
 
 ---
 
 ## Major Code Changes
 
-### 1. Routing & Graph (`graph/nodes.py`, `graph/edges.py`, `agents/supervisor.py`)
+### 1. Reranker Model Swap + Comparison (`rag/reranker.py`, `benchmarks/run_beir_reranker_compare.py`)
 
-**Problem:** Infinite fact_checker loop caused by hard iteration cap returning `next_agent="fact_checker"` on every supervisor call, bypassing the `last_agent == "fact_checker" → writer` transition in `_route_from_state`.
+**Problem:** `ms-marco-MiniLM-L-6-v2` was the only reranker ever evaluated in production.
 
 **Solution:**
-- Removed hard iteration cap from `supervisor_node`
-- Moved ceiling check (`iteration >= max_iterations * 4`) to **before** LLM construction
-- This ensures: (a) no LLM call when ceiling fires (eliminates auth noise in tests), (b) fast deterministic routing
-- All actual routing logic in `_route_from_state` — no early returns in supervisor_node
-- Added warning log for unrecognised `next_agent` values in `route_from_supervisor`
+- Benchmarked `BAAI/bge-reranker-v2-m3` (failed to load — insufficient RAM), `BAAI/bge-reranker-base`, and `mixedbread-ai/mxbai-rerank-xsmall-v1` against the incumbent on BEIR (SciFact/NFCorpus/ArguAna, seed 42, 100 queries each)
+- `bge-reranker-base` never regresses nDCG@10 vs. dense retrieval alone (ms-marco does, on SciFact); ~6x slower on CPU
+- `mxbai-rerank-xsmall-v1` wins on quality everywhere it's exercised but runs ~10x slower per pair than `bge-reranker-base` despite a quarter of the parameters — parameter count isn't a reliable proxy for CPU inference cost
+- Production stays on `bge-reranker-base`; comparison script refactored to a data-driven `RERANKER_MODELS` list
 
-**Impact:** Routing is now provably correct via deterministic state machine in `_route_from_state`; LLM-driven decisions only for plan creation.
+**Impact:** Reranker choice is now evidence-based and documented (`benchmarks/README.md`), not inherited by default.
 
 ---
 
-### 2. HITL: Dual Feedback Channels (`schemas/state.py`, `app.py`, `agents/writer.py`, `agents/researcher.py`)
+### 2. Document-Extraction Pipeline Replaces Chunk+Embed+Retrieve for Uploads (`agents/document_worker.py`, `graph/nodes.py`, `schemas/state.py`)
 
-**Problem:** Single `human_feedback` field caused reviewer feedback intended for the Writer to trigger a Researcher re-pass (infinite loop risk).
+**Problem:** Uploaded PDFs/URLs went through the same chunk→embed→top-k-retrieve path as everything else, even though the corpus is small (3-15 documents/session) and known entirely upfront — retrieval risk (chunk-boundary loss, reranker guard skipping long queries) for no benefit over just reading the whole document.
 
 **Solution:**
-- Added `writer_instructions: NotRequired[str | None]` state field (separate from `human_feedback`)
-- Researcher consumes only `human_feedback` (triggers re-research)
-- Writer consumes `writer_instructions` (triggers report revision)
-- Supervisor checks `writer_instructions` when deciding if completed report truly ends session
-- `writer_node` clears `writer_instructions` after use
-- `_resume_after_hitl` in app.py writes to `writer_instructions` (not `human_feedback`)
+- `document_pass_node`/`document_worker_node`: one single-shot structured-output extraction call per document (or per size-bounded slice of an oversized one, split at sentence boundaries via LlamaIndex's `SentenceSplitter` used purely as a boundary-finder)
+- Runs once, before round-0 sub-question dispatch; `_research_targets`' round-0 branch now skips any sub-question a document already answered
+- Sub-question values are snapped to the plan's canonical strings so results slot into the existing merge-by-id reducer, rework loop, and critic — no new state machinery
+- Deterministic finding IDs (`uuid5` keyed on `document_url + sub_question`) so two parts of a split document answering the same sub-question collide into one finding instead of producing duplicates
 
-**Impact:** HITL feedback paths no longer interfere; users can request revisions without re-triggering research.
+**Impact:** No retrieval-quality risk for uploaded content; `retrieve_from_rag` now exclusively serves evidence discovered by earlier rounds of live research (persisted by `collect_node`, dedup-aware).
 
 ---
 
-### 3. SSRF Protection (`utils/security.py`, `tools/url_fetcher.py`)
+### 3. Dual LLM-Call Budget Pools (`runtime/budget.py`, `graph/nodes.py`)
 
-**Problem:** String-prefix blocklist for SSRF (`127.`, `192.`, etc.) misses hex (`0x7f000001`), decimal (`2130706433`), and IPv4-mapped IPv6 (`::ffff:10.0.0.1`) notations.
+**Problem:** A single shared budget meant a worker-loop overrun (multiple rounds × multiple tool turns) could exhaust the budget before critic/fact-checker/writer ever ran — observed live: 49/40 calls used, and the session produced a **completely empty report** despite the worker loop having gathered five good findings.
 
 **Solution:**
-- Replaced with `ipaddress.ip_address()` + DNS resolution (`socket.getaddrinfo`)
-- Covers all IP representations, returns True for: loopback, private (RFC1918), link-local, reserved, unspecified
-- Added `_safe_get()` for SSRF-safe redirect following: validates each `Location` header before re-requesting
-- Blocks protocol-relative redirects (`//`), normalises relative redirects via `urljoin`
+- Split into a **research** pool (supervisor, document workers, dispatch/worker loop) and a **review** pool (critic, fact-checker, writer, judge)
+- `writer_node` is deliberately never budget-gated — only the *optional* LLM-judge sub-call is
+- `next_agent` gained a reducer (`_last_value`) so ≥2 parallel Send-fanned branches independently hitting an exhausted pool in the same graph step no longer crash with `InvalidUpdateError`
 
-**Impact:** SSRF threat model now complete; no bypass via alternate IP representations.
+**Impact:** A research-loop overrun now degrades gracefully — the writer still produces a real report from whatever findings exist, instead of an empty placeholder.
 
 ---
 
-### 4. RAG Consolidation (`rag/_chroma.py`, `rag/ingestion.py`, `rag/indexes.py`)
+### 4. Supervisor Sub-Question Generation Fix (`agents/supervisor.py`)
 
-**Problem:** `session_chroma_path()` and `collection_name()` helpers duplicated in ingestion.py and indexes.py.
+**Problem:** The prompt said "generate AT MOST N sub-questions" — no pressure to use the budget. Observed live: for *"key differences between LoRA and QLoRA"*, the model generated exactly **one** sub-question, about LoRA only, silently dropping QLoRA from the plan entirely.
 
 **Solution:**
-- Created `rag/_chroma.py` as single source of truth
-- Both modules import from there (with optional aliases for backward compatibility)
-- Fixed `build_summary_index` to pass `llm` and `embed_model` as explicit kwargs (not via global `LISettings` singleton, which is a race condition under concurrent Streamlit sessions)
+- "Generate EXACTLY N sub-questions" — removes the model's discretion over count
+- Explicit instruction that a comparison topic ("X vs Y") must generate sub-questions covering each side individually *and* their direct comparison, never collapsing to one side
 
-**Impact:** No duplicate logic; thread-safe RAG layer.
+**Impact:** Reproduced and fixed — the same query now reliably dispatches sub-questions covering both techniques.
 
 ---
 
-### 5. Synthesis Prompt Fix (`agents/researcher.py`)
+### 5. JSON-Repair for Unescaped-Backslash Parse Failures (`agents/_utils.py`)
 
-**Problem:** `_SYNTHESIS_PROMPT.format(sub_question=sub_q)` crashed with `Graph error: '\n "claim"'` because the template contained JSON braces from `json_output_instruction()`, and `.format()` tried to parse them as field names.
+**Problem:** A worker synthesizing a claim with LaTeX notation (`\in`, `\mathbb{R}`, `\text{...}`) would break `json.loads` with `Invalid \escape` — observed repeatedly in live runs, always falling back to a `[Research incomplete]` placeholder and discarding real, already-generated content.
 
 **Solution:**
-- Replaced module-level `_SYNTHESIS_PROMPT` string template with `_synthesis_prompt(sub_question)` function
-- Function uses f-string interpolation (no `.format()` parsing)
-- JSON suffix remains separate: `_SYNTHESIS_JSON_SUFFIX`
+- `_recover_from_bad_escapes` reads `OutputParserException.llm_output` (the raw text LangChain's parser attaches to the exception), strips markdown fences, and doubles any backslash *not* already followed by `\` or `"`
+- Deliberately does **not** treat `\n`/`\t`/`\r`/`\b`/`\f`/`\u` as pre-escaped: common LaTeX commands (`\text`, `\theta`, `\times`, `\frac`) start with exactly those letters, and treating them as valid escapes would silently corrupt the content instead of fixing it
+- Wired into every structured-output call site: workers, document workers, critic, fact-checker, LLM judge
 
-**Impact:** Synthesis prompt no longer crashes; JSON braces safe in prompts.
+**Impact:** Verified live — a synthesis call that previously produced a placeholder now recovers the full real claim.
 
 ---
 
-### 6. TavilyClient Singleton (`tools/web_search.py`, `tests/unit/test_tools.py`)
+### 6. Critic/Fact-Checker Batching, Parallelization, and Correctness Fixes (`agents/critic.py`, `agents/fact_checker.py`, `graph/nodes.py`)
 
-**Problem:** Module-level `_tavily_client` singleton persisted between tests, so `@patch("TavilyClient")` only worked for the first test.
+**Problem:** One LLM call per finding instead of per batch; independent batches awaited sequentially instead of concurrently; `rework_counts` incremented for *any* sub-question lacking a finding, including the mandatory round-0→round-1 loop that fires before the critic ever runs — silently consuming a finding's rework budget before any critique existed.
 
 **Solution:**
-- Added `_get_tavily_client()` function with API-key-change detection
-- Test `setup_method` resets globals via `sys.modules.get("research_swarm.tools.web_search")` (not import alias, which resolves to StructuredTool)
-- Client recreated if API key changes at runtime (e.g., user updates .env)
+- Batched review (`judge_batch_size` findings per call, shared sources deduped by URL within a batch), batches run via `asyncio.gather`
+- New `_weak_or_refuted_sub_questions` helper — `rework_counts` now increments only for sub-questions the critic actually flagged, not every findingless one
 
-**Impact:** Tests properly isolated; tool can adapt to credential changes without restart.
+**Impact:** Faster review pass; rework budget now means what its name says.
 
 ---
 
-### 7. SQLite Commits (`persistence/sessions.py`)
+### 7. Report Quality-Score and Faithfulness-Check Fixes (`schemas/report.py`, `agents/writer.py`)
 
-**Problem:** `delete_session` had a single `try/except/commit` block. When `DELETE FROM writes` raised OperationalError (table doesn't exist in old DBs), the commit was skipped, leaving checkpoint rows behind.
+**Problem:** `ReportQualityScore.relevance`/`completeness` defaulted to `0.0` — indistinguishable from "computed and genuinely zero" — and once the writer started always attaching a `quality_score`, the UI showed a misleading "Relevance: 0%, Completeness: 0%" on every report. Separately, `_attach_quality_score` re-ran the full section+snippet embedding pass a second time even though `_faithfulness_rewrite` had just computed the same thing.
 
 **Solution:**
-- Split into two independent try/commit blocks
-- First: delete checkpoints and commit
-- Second: delete writes and commit (independent OperationalError handling)
-- Added `shutil.rmtree()` for Chroma directory cleanup
+- `relevance`/`completeness` default to `None` ("not computed"); `overall` averages only populated dimensions
+- Faithfulness rewrite now returns its score alongside the report so the writer reuses it instead of re-embedding; rewrite pass targets only the specific under-grounded sections instead of regenerating the whole report blind
 
-**Impact:** Sessions properly deleted even when writes table is missing.
+**Impact:** No fabricated scores in the UI; one fewer full embedding pass per report.
 
 ---
 
-### 8. Cache Busting (`app.py`)
+### 8. PubMed Search + Domain Routing (`tools/pubmed_tool.py`, `agents/workers.py`)
 
-**Problem:** `@st.cache_resource` served stale compiled graph after code edits (Streamlit's hot-reload updates module code but cache key unchanged).
+**Problem:** Only `arxiv_search` was available for literature search — arXiv barely indexes biomedical/clinical content.
 
-**Solution:**
-- Added `_agent_code_hash()` function hashing mtime of all `.py` files
-- Passed as `_code_hash` parameter to `@st.cache_resource`
-- Cache key changes whenever source changes → forces recompile
+**Solution:** Added `pubmed_search` alongside `arxiv_search`, with explicit routing guidance so a worker checks a result is actually about the sub-question's subject regardless of which tool it came from.
 
-**Impact:** No need to restart Streamlit after code changes.
+**Impact:** Medical/clinical/biomedical sub-questions get an actual literature source instead of arXiv's sparse coverage.
 
 ---
 
-## Test Suite Changes (157 Tests)
+## Test Suite Changes (348 Tests)
 
-| File | Tests | Changes |
-|------|-------|---------|
-| `test_tools.py` | 22 | Fixed `setup_method` to use `sys.modules` for module reference |
-| `test_graph.py` | 44 | Updated `test_iteration_cap_forces_fact_checker` to match pre-LLM ceiling check |
-| `test_rag.py` | 20 | Updated patch target to `research_swarm.rag._chroma.session_chroma_path` |
-| `test_db.py` | 25 | Tests now pass with split commits in `delete_session` |
-| `test_agents.py` | 34 | Updated Critic fallback test: `weak` → `supported` |
-| `test_schemas.py` | 12 | No changes |
+| File | Changes |
+|------|---------|
+| `test_document_worker.py` | New — extraction, sentence-boundary splitting, sub-question snapping |
+| `test_budget.py` | New — dual-pool independence, `_last_value` reducer behavior |
+| `test_utils.py` | New — bad-escape JSON repair, LaTeX-command preservation, schema-echo recovery |
+| `test_faithfulness.py` | New — per-section scoring, targeted rewrite |
+| `test_llm_judge.py` | New — judge scoring, fallback on failure |
+| `test_runs.py` | New — API run orchestration |
+| `test_agents.py` | Updated — synthesis comparability check, source-ranking batching, supervisor exact-count generation |
+| `test_graph.py` | Updated — document-pass routing, round-0 skip logic, rework-count accounting, collect-node evidence persistence |
+| `test_rag.py` | Updated — dedup-aware evidence ingestion |
+| `test_schemas.py` | Updated — `ReportQualityScore` None-defaults |
 
 ---
 
 ## Tech Stack
 
 ### Core
-- **LangGraph 0.2+** — multi-agent state graph
+- **LangGraph 1.2+** — multi-agent state graph
 - **LangChain 0.3+** — LLM abstraction
-- **LlamaIndex 0.11+** — RAG indexing and query engines
+- **LlamaIndex 0.11+** — RAG indexing, query engines, and sentence-boundary splitting
 - **Streamlit 1.37+** — web UI
+- **FastAPI** — REST API layer (routes, run orchestration) alongside the Streamlit app
 
 ### LLM Providers
-- **Anthropic Claude** — primary
-- **OpenAI GPT** — alternative
-- **Ollama** — local inference
+- **Ollama** (`gemma4:31b-cloud`) — default
+- **Anthropic Claude**, **OpenAI GPT** — alternatives
 
 ### Data & Search
 - **Tavily** — web search
-- **arXiv API** — academic papers
-- **ChromaDB** — vector store (per-session, local)
+- **arXiv API** — CS/physics/math preprints
+- **PubMed** *(new)* — biomedical/clinical literature
+- **BAAI/bge-reranker-base** — cross-encoder reranking
+- **ChromaDB** — vector store for cross-round evidence persistence (not uploaded documents)
 - **HuggingFace bge-small-en-v1.5** — embeddings
 
 ### Persistence & Testing
 - **SQLite + aiosqlite** — checkpoints
-- **pytest + pytest-asyncio** — 157 offline tests
-
----
-
-## File Structure
-
-```
-research_swarm/
-├── agents/              # 5 agent modules + _utils.py
-├── graph/               # builder.py, nodes.py, edges.py
-├── rag/                 # _chroma.py (NEW), indexes.py, ingestion.py, query_engines.py
-├── tools/               # web_search, arxiv, url_fetcher, pdf_loader, retriever_tool
-├── utils/               # security.py (NEW — SSRF + content sanitiser)
-├── schemas/             # state, query, plan, finding, critique, report, source
-├── ui/                  # sidebar, trace, report_view, sessions_view
-├── persistence/         # sessions.py (list/load/delete)
-└── config.py            # Settings singleton
-```
+- **pytest + pytest-asyncio** — 348 offline tests
 
 ---
 
 ## Key Design Patterns
 
-### 1. Deterministic Routing
-All supervisor routing rules hardcoded in `_route_from_state()` — LLM only trusted for plan creation. Prevents loops from prompt non-compliance.
+### 1. Two-Source Evidence Model
+Live web/arXiv/PubMed search feeds the sub-question dispatch loop; ingested documents feed a separate one-time extraction pass. Both converge on the same `Finding` schema and downstream critic/fact-checker/writer pipeline — no special-casing further down the graph.
 
-### 2. Dual HITL Channels
-`human_feedback` for researcher, `writer_instructions` for writer. Prevents feedback misrouting and unintended re-research loops.
+### 2. Dual Budget Pools
+Research (can run away across rounds) and review (a few batched calls) are counted independently, so exhausting one can't silently zero out the other's output.
 
-### 3. Merge-by-ID Findings
-Fact-checker updates finding confidence by returning same `id` — state reducer overwrites in-place, no duplicates. Sub-question string normalisation prevents ID regeneration on re-research.
+### 3. Merge-by-ID Findings, Deterministic IDs Where Order Isn't Guaranteed
+Fact-checker and re-research reuse an existing finding's ID to update in place. Document-worker parts, dispatched concurrently with no prior-round state to look up, instead derive a deterministic ID from `(document_url, sub_question)` so duplicates collapse the same way.
 
-### 4. Append-Only Critiques
-Multiple critique passes stack. `_latest_verdicts()` scans from end to find most recent verdict per finding.
+### 4. Best-Effort Recovery Over Silent Placeholders
+Both `recover_from_parse_failure`'s two independent recovery paths (schema-echo, bad-escapes) and the budget-pool split follow the same philosophy: when something fails, recover or degrade gracefully rather than silently discarding real work.
 
-### 5. Module Singleton Patterns
-- **Embedding model:** `@lru_cache(maxsize=1)` on `get_embed_model()` — load once, reuse forever
-- **TavilyClient:** Module-level singleton with API-key-change detection
-- **Settings:** Single `Settings()` instance, mutable at runtime for UI overrides
-
-### 6. Two-Phase Commits
-Delete operations split into independent commits to handle missing tables in older databases.
+### 5. Exact Counts Over Unenforced Ceilings
+Where a model was given a soft ceiling ("at most N") and no pressure to use it, it under-delivered in a way that silently dropped scope. Replaced with an exact requirement plus explicit coverage instructions.
 
 ---
 
@@ -244,7 +213,7 @@ streamlit run app.py
 
 ### Test
 ```bash
-poetry run pytest          # all 157 tests
+poetry run pytest          # all 348 tests
 poetry run pytest tests/unit/test_graph.py -v  # one file
 ```
 
@@ -253,49 +222,54 @@ poetry run pytest tests/unit/test_graph.py -v  # one file
 ## Resume Points for Future Work
 
 ### Known Limitations
-1. **Iteration cap:** Hard ceiling at `max_iterations * 4` supervisor calls prevents infinite loops but may cut off valuable research
-2. **LLM consistency:** No constrained decoding for plan JSON — fallback error handling exists but could be hardened
-3. **Memory:** Large research sessions can accumulate many message tokens; consider summarization
+1. **Reranker latency:** `bge-reranker-base` is ~6x slower on CPU than the ms-marco model it replaced; worth revisiting if reranking latency becomes a bottleneck in a live run
+2. **JSON-repair scope:** the bad-escapes recovery path relies on `OutputParserException.llm_output`, which is specific to LangChain's JSON-mode parser (Ollama) — providers whose `with_structured_output` uses tool-calling (Anthropic/OpenAI) raise a different exception shape and aren't covered
+3. **Document cross-part synthesis:** a claim spanning content split across two parts of one oversized document can't be connected by either part's worker — accepted tradeoff for guaranteeing full fidelity within each slice
 
 ### Enhancement Opportunities
-1. **Parallel researcher:** Run multiple sub-questions in parallel (async fan-out) instead of sequentially
-2. **Streaming report:** Stream report sections as they're written (not all-at-once at end)
-3. **Fact-checker depth:** Cross-check sources against *other* sources, not just the claim
-4. **Custom RAG:** Let users inject domain-specific vector stores or custom retrievers
-5. **Export formats:** Add HTML, LaTeX, APA-formatted bibliography
+1. **Fast-tier model:** currently pointed at the same model as the thorough tier (a deliberate, explicit tradeoff after the original fast-tier model stopped resolving locally) — worth re-pointing at a genuinely cheap model once one is confirmed available
+2. **Tool-calling JSON repair:** extend `recover_from_parse_failure` to cover Anthropic/OpenAI's tool-calling parse-failure shape
+3. **Unused settings cleanup:** `settings.llm_judge_pass_threshold` is defined but never read (the judge module uses its own hardcoded constant)
+4. **API/Streamlit parity:** the document-pass pipeline's backend is complete, but only the Streamlit `app.py` upload flow currently populates `ingested_documents` — the FastAPI `documents` route should be checked for the same wiring
 
 ### Testing
-- All 157 tests pass; coverage unknown (not tracked)
-- Manual E2E test via Streamlit UI recommended before each release
-- HITL pause/resume tested via `test_hitl_interrupt_and_resume` in `test_graph.py`
+- All 348 tests pass, fully offline (all LLM calls mocked)
+- Manual end-to-end verification via `run_research.py` recommended before relying on a new model/config combination — several of the fixes above were only caught by an actual live run, not the mocked test suite
 
 ---
 
 ## Session Metadata
 
-**Commits:**
-- `bcb0c44` — Fix routing loops, SSRF, HITL channels, RAG deduplication, and test suite
-- `4627d37` — Add TECHNICAL.md — detailed architecture and implementation documentation
+**Commits** (`c77cc40..8235881`, 12 commits, July 10 – August 6):
+- `c77cc40` / `983cb8c` — FastAPI app scaffold + REST routes
+- `d6be076` — LLM-judge review pass
+- `44fc4ad` / `faf1433` — FastAPI dependencies + reranker swap
+- `9d7852a` — Per-session credential/endpoint resolution
+- `8d65662` — mxbai-rerank-xsmall-v1 comparison
+- `799f2e0` — Document-extraction pipeline + evidence persistence
+- `d18ae98` — Comparability/citation prompt hardening
+- `81816e4` — Config settings + research-intensity tuning
+- `63a22b2` — Batched review pipeline, dual budget pools, PubMed search, correctness fixes
+- `8235881` — Test coverage catch-up
 
-**Total changes:** 30 files modified, 2 new modules created, 939 insertions / 281 deletions
+**Total changes:** 55 files changed, 6,404 insertions / 1,070 deletions
 
-**Test status:** 157/157 passing ✓
-
----
-
-## Quick Reference: Critical Bug Fixes
-
-| Bug | Root Cause | Fix | Commit |
-|-----|-----------|-----|--------|
-| Infinite fact_checker loop | Hard cap in supervisor_node returned fact_checker unconditionally | Move ceiling check before LLM, let _route_from_state handle all routing | bcb0c44 |
-| Graph error: '\n "claim"' | .format() parsed JSON braces as field names | Use f-string function instead of .format() template | bcb0c44 |
-| Stale compiled graph | @st.cache_resource key never changed after code edits | Add _agent_code_hash() parameter to cache key | bcb0c44 |
-| SSRF bypass via hex IPs | String prefix blocklist incomplete | Use ipaddress module + DNS resolution | bcb0c44 |
-| Tests fail: TavilyClient persists | setup_method reset wrong object (import alias vs module) | Use sys.modules to get actual module | bcb0c44 |
-| RAG helpers duplicated | session_chroma_path in two places | Extract to _chroma.py | bcb0c44 |
-| HITL feedback conflicted | Single field caused writer feedback to trigger researcher | Dual channels: human_feedback / writer_instructions | bcb0c44 |
-| SQLite commit skipped | Single try/except blocked both deletes on missing table | Independent try/commit for each delete | bcb0c44 |
+**Test status:** 348/348 passing ✓
 
 ---
 
-**For detailed implementation, see `TECHNICAL.md` in the repo.**
+## Quick Reference: Critical Fixes
+
+| Issue | Root Cause | Fix | Commit |
+|-------|-----------|-----|--------|
+| Empty report despite good findings | Single shared LLM-call budget exhausted by worker-loop overrun before critic/fact-checker/writer ran | Split into research/review pools; writer never budget-gated | `63a22b2` |
+| Graph crash: `InvalidUpdateError` | `next_agent` had no reducer; ≥2 parallel branches writing it in one step is rejected even with identical values | `Annotated[AgentName \| None, _last_value]` reducer | `63a22b2` |
+| Supervisor drops half a comparison topic | "AT MOST N sub-questions" gave no pressure to use the budget | "EXACTLY N" + explicit both-sides coverage instruction | `81816e4` |
+| Synthesis discards real content on LaTeX | Unescaped backslashes in claims break `json.loads` | Repair-and-reparse recovery path in `recover_from_parse_failure` | `63a22b2` |
+| Duplicate findings from one document | Split document parts each generate a fresh random ID | Deterministic `uuid5(document_url + sub_question)` | `63a22b2` |
+| Misleading 0% quality badges | `relevance`/`completeness` defaulted to `0.0`, indistinguishable from "computed" | Default to `None`; `overall` averages only populated fields | `63a22b2` |
+| Retrieval risk for uploaded documents | Chunk+embed+retrieve for a small, fully-known-upfront corpus | Single-shot full-document extraction, no vector search | `799f2e0` |
+
+---
+
+**For detailed architecture, see `CLAUDE.md` and `README.md` in the repo.**

@@ -11,16 +11,28 @@ Built with **LangGraph 1.2**, **LlamaIndex**, **ChromaDB**, and **Streamlit**.
 ```
 START → supervisor (plan + complexity score)
           ↓
-        dispatch_node ──► worker_node × N  (parallel via Send)
+        document_pass_node ──► document_worker_node × N  (one-time, per ingested doc)
+          ↓ (bounces straight through when nothing was uploaded)
+        dispatch_node ──► worker_node × N  (parallel via Send, live web/arXiv/PubMed)
           ↑                    ↓
-          └── re-research  collect_node (stop-signal check)
+          └── re-research  collect_node (stop-signal check + evidence persisted to RAG)
                                 ↓
-                          critic → fact_checker → writer → END
+                          critic ──┐
+                          ↑        ↓ (weak/refuted, under rework cap)
+                          └── dispatch_node
+                                ↓
+                          fact_checker → writer (+ optional LLM judge) → END
 ```
 
 **Phase 4 additions:** `dispatch_node` fans out to N parallel workers via LangGraph `Send`, one per sub-question. Each worker carries a role (`academic / industry / skeptic / benchmark / general`) chosen by the supervisor. `collect_node` decides whether to stop (marginal-gain threshold or hard round cap) or dispatch another pass. All non-LLM routing is deterministic - the supervisor LLM is called only once for plan creation.
 
-**State** (`AgentState`) threads through every node as a single `TypedDict`. Custom reducers: `findings` merges by id (fact-checker overwrites in-place); `critiques` appends.
+**Document pass:** user-uploaded PDFs/URLs no longer go through chunk+embed+retrieve. `document_pass_node` fans out one single-shot extraction worker per document (or per size-bounded slice of an oversized one, split at sentence boundaries) before round-0 dispatch, producing ordinary `Finding`s the same way live research does. `_research_targets`'s round-0 check skips any sub-question a document already answered, so web workers don't duplicate that work. `retrieve_from_rag` still exists, but now only surfaces evidence discovered by *earlier rounds of the same session* (persisted by `collect_node` after every round) — not uploaded documents.
+
+**Rework loop:** `critic` can route weak/refuted findings back to `dispatch_node` for targeted re-research, capped by `max_rework_attempts` independently of the overall round cap, so one chronically-bad finding can't hog rounds that would otherwise go to others.
+
+**Budget:** LLM calls are split into two independent pools (`runtime/budget.py`) — a **research** pool covering the document pass and the dispatch/worker loop (the part that can genuinely run away across rounds and tool turns), and a smaller **review** pool covering critic/fact-checker/writer/judge (a few batched calls each). A research-loop overrun degrades gracefully instead of starving the review stage — the writer always runs on whatever findings exist, rather than the whole session producing an empty report.
+
+**State** (`AgentState`) threads through every node as a single `TypedDict`. Custom reducers: `findings` merges by id (fact-checker overwrites in-place); `critiques` appends; `next_agent` tolerates concurrent same-value writes from parallel Send-fanned branches (e.g. several workers hitting an exhausted budget in the same step) instead of crashing.
 
 ---
 
@@ -65,7 +77,7 @@ All settings are overridable from the sidebar at runtime.
 
 ![Report tab - executive summary, sections with inline citations, and reference list](docs/screenshots/06_report_top.png)
 
-1. Enter a topic, select audience + depth, optionally upload PDFs/URLs for RAG.
+1. Enter a topic, select audience + depth, optionally upload PDFs/URLs (extracted directly into findings, no separate vector search step).
 2. Click **Start Research** - live agent trace streams as the swarm works.
 3. If HITL is on, approve findings before the Writer runs.
 4. Switch to **Report** to read, copy, or download. Past sessions live in **Sessions**.
@@ -76,11 +88,13 @@ All settings are overridable from the sidebar at runtime.
 
 | Agent | Role |
 |---|---|
-| **Supervisor** | Creates the research plan with sub-questions, complexity score, and worker-role assignments. Only LLM-invoked once per session. |
-| **Workers** (×N) | Parallel ReAct tool loops - each researches one sub-question with a role-specific strategy (academic, industry, skeptic, benchmark, or general). |
-| **Critic** | Reviews each finding: `supported / weak / refuted`. Weak/refuted findings trigger another dispatch round (up to the round cap). |
+| **Supervisor** | Creates the research plan: an *exact* sub-question count per depth (not a ceiling — an unenforced "at most N" let the model under-decompose comparison topics), worker-role assignments, and a complexity score. Explicitly required to cover every side of a "X vs Y"-style topic, not just one. Only LLM-invoked once per session. |
+| **Document workers** (×N) | One single-shot extraction pass per ingested document (or per size-bounded slice of an oversized one) before live research starts — no chunking, no retrieval, the model sees the full text. |
+| **Workers** (×N) | Parallel ReAct tool loops over web/arXiv/PubMed search - each researches one sub-question with a role-specific strategy (academic, industry, skeptic, benchmark, or general), routing to the tool that actually covers the sub-question's domain. |
+| **Critic** | Reviews findings in batches (one LLM call per `judge_batch_size` findings, run concurrently): `supported / weak / refuted`. Weak/refuted findings trigger another dispatch round, capped both by the overall round limit and a per-finding `max_rework_attempts`. |
 | **Fact-Checker** | Cross-checks claims against source snippets; adjusts confidence scores. Evidence-backed findings are floored at 0.15 so a mis-calibrated model can't zero out a claim that has real sources. |
-| **Writer** | Synthesises validated findings into a structured report. Runs a faithfulness check (embedding cosine similarity) and rewrites once if score < 0.25. |
+| **Writer** | Synthesises validated findings into a structured report, citing each source precisely rather than attaching a finding's whole source list to every sentence derived from it. Runs a per-section faithfulness check and rewrites only the sections that fall below threshold. |
+| **LLM Judge** *(optional)* | An independent LLM review pass over the finished report — catches what embedding similarity can't (wrong topic, an unaddressed sub-question, a citation to a reference that doesn't exist). |
 
 ---
 
@@ -88,7 +102,8 @@ All settings are overridable from the sidebar at runtime.
 
 | Feature | Detail |
 |---|---|
-| **Budget guard** | Counts actual LLM calls per session; raises `BudgetExceeded` and forces a graceful writer fallback above `MAX_LLM_CALLS`. |
+| **Dual budget pools** | LLM calls split into a **research** pool (document/web workers — the part that can genuinely run away across rounds) and a smaller **review** pool (critic/fact-checker/writer/judge). A research-loop overrun degrades gracefully instead of starving the review stage of the budget it needs to produce a real report. |
+| **JSON-repair recovery** | Structured-output failures caused by unescaped backslashes (e.g. raw LaTeX in a claim breaking `json.loads`) are repaired and reparsed instead of discarding a real, already-generated answer. |
 | **Cross-encoder reranker** | `bge-reranker-base` (CPU, 280 MB) reranks RAG chunks by relevance before returning to the researcher. |
 | **Faithfulness check** | BGE embeddings score each report section against its cited snippets; triggers a rewrite if grounding is too low. |
 | **SSRF protection** | URL fetcher validates every hop against a private-IP blocklist; fetched content is sanitised for prompt-injection patterns. |
@@ -115,7 +130,7 @@ The cross-encoder reranker (`bge-reranker-base`, swapped in from `ms-marco-MiniL
 ## Development
 
 ```bash
-# Run all 181 tests (fully offline - all LLMs mocked)
+# Run all 348 tests (fully offline - all LLMs mocked)
 poetry run pytest
 
 # Specific test file
