@@ -1,14 +1,15 @@
 """RAG query engine factory.
 
-Returns the best available query engine for a session:
+Returns a vector query engine for a session (similarity search over the
+session's Chroma-backed index), with an LLM-synthesised response when Ollama
+is reachable and raw source-node retrieval (response_mode="no_text") when
+it isn't.
 
-  Ollama reachable -> RouterQueryEngine
-      +--- VectorQueryEngine  (specific facts, similarity search)
-      +--- SummaryQueryEngine (high-level overview, broad questions)
-       +--- with SubQuestionQueryEngine wrapper for complex multi-part queries
-
-  Ollama not reachable -> plain VectorQueryEngine
-      (response_mode="no_text" -- returns source nodes; no LLM synthesis)
+A Router(vector, summary) + SubQuestionQueryEngine stack used to sit in front
+of this whenever Ollama was reachable, offering query routing and
+decomposition. Removed -- see get_research_query_engine's docstring for why
+both layers made retrieval strictly less reliable than the plain vector
+engine alone, not just unhelpfully fancy.
 
 All computation is fully local -- embeddings via HuggingFace, LLM via Ollama.
 The research agent's own LLM handles final synthesis; this layer only retrieves.
@@ -19,16 +20,13 @@ import logging
 import time
 
 import httpx
-from llama_index.core import SummaryIndex, VectorStoreIndex
+from llama_index.core import VectorStoreIndex
 from llama_index.core.base.base_query_engine import BaseQueryEngine
 from llama_index.core.base.llms.base import BaseLLM
-from llama_index.core.query_engine import RouterQueryEngine, SubQuestionQueryEngine
-from llama_index.core.selectors import LLMSingleSelector
-from llama_index.core.tools import QueryEngineTool
 from llama_index.llms.ollama import Ollama
 
 from research_swarm.config import settings
-from research_swarm.rag.indexes import build_summary_index, load_vector_index
+from research_swarm.rag.indexes import load_vector_index
 from research_swarm.runtime.session_ctx import resolve_ollama_base_url
 
 logger = logging.getLogger(__name__)
@@ -124,59 +122,6 @@ def _vector_query_engine(
     )
 
 
-def _summary_query_engine(summary_index: SummaryIndex, llm: BaseLLM) -> BaseQueryEngine:
-    return summary_index.as_query_engine(
-        llm=llm,
-        response_mode="tree_summarize",
-    )
-
-
-def _router_query_engine(
-    vector_engine: BaseQueryEngine,
-    summary_engine: BaseQueryEngine,
-    llm: BaseLLM,
-) -> RouterQueryEngine:
-    """Combine vector + summary engines under an LLM-driven router."""
-    vector_tool = QueryEngineTool.from_defaults(
-        query_engine=vector_engine,
-        name="vector_search",
-        description=(
-            "Useful for answering specific factual questions, retrieving exact claims, "
-            "statistics, or detailed information from the research corpus."
-        ),
-    )
-    summary_tool = QueryEngineTool.from_defaults(
-        query_engine=summary_engine,
-        name="summary_search",
-        description=(
-            "Useful for high-level overviews, broad questions about themes, "
-            "methodology, or general context across documents."
-        ),
-    )
-    return RouterQueryEngine(
-        selector=LLMSingleSelector.from_defaults(llm=llm),
-        query_engine_tools=[vector_tool, summary_tool],
-    )
-
-
-def _sub_question_engine(
-    router_engine: BaseQueryEngine,
-    llm: BaseLLM,
-) -> SubQuestionQueryEngine:
-    """Wrap the router in a SubQuestionQueryEngine for complex multi-part queries."""
-    router_tool = QueryEngineTool.from_defaults(
-        query_engine=router_engine,
-        name="research_corpus",
-        description="The full session research corpus (PDFs, web pages, arXiv papers).",
-    )
-    return SubQuestionQueryEngine.from_defaults(
-        query_engine_tools=[router_tool],
-        llm=llm,
-        use_async=False,
-        verbose=False,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Public factory
 # ---------------------------------------------------------------------------
@@ -185,32 +130,48 @@ def get_research_query_engine(
     session_id: str,
     max_sources: int | None = None,
 ) -> BaseQueryEngine:
-    """Return the best available query engine for the given session.
-
-    Checks whether Ollama is reachable and builds accordingly:
-      - Ollama UP  -> SubQuestionQueryEngine(RouterQueryEngine(vector, summary))
-      - Ollama DOWN -> plain VectorQueryEngine with response_mode="no_text"
+    """Return the query engine for the given session: a plain vector engine.
 
     max_sources controls the vector store's similarity_top_k.  When None the
     value from settings.max_sources is used, preserving backward compatibility.
 
     The returned engine is safe to call with `.query(question_str)`.
     Source nodes are always available on the response via `.source_nodes`.
+
+    This used to route through RouterQueryEngine(vector, summary) wrapped in
+    a SubQuestionQueryEngine whenever Ollama was reachable. Both extra layers
+    were broken in a way that made retrieve_from_rag worse than not having
+    them at all, not just unhelpful:
+
+    - The summary engine was always empty. build_summary_index() was called
+      with documents=None unconditionally -- nothing in this path ever
+      reconstructs the session's ingested documents to populate it, so
+      querying it can only ever return nothing.
+    - The router's LLMSingleSelector has no way to know that, and routes a
+      real fraction of queries into that permanently-empty summary index
+      instead of the working vector index -- confirmed directly: a query
+      against a session with real, successfully-ingested content got routed
+      to "summary_search" and returned zero source nodes, while the same
+      query against the plain vector engine returned 4 well-scored matches.
+    - SubQuestionQueryEngine.from_defaults() additionally reaches for
+      llama-index-question-gen-openai internally regardless of which LLM
+      provider is configured. That package isn't installable alongside this
+      project's llama-index-core/llama-index-llms-ollama version pins
+      (conflicting llama-index-core ranges), so this raised ImportError on
+      every single call.
+
+    Both failures reach the calling worker as a swallowed "[Tool error: ...]"
+    tool result (via the tool loop's generic exception handler) or a
+    confident "Empty Response" with no source nodes -- both indistinguishable
+    from "no evidence exists" to a worker with no tool turns left to recover
+    with (shallow depth's single required call has nowhere else to go).
+    Standard/deep depth's later tool turns masked this by recovering via
+    web_search, which is why it went unnoticed outside a single-turn depth.
+    Skipping straight to the plain vector engine is strictly more reliable
+    than what the router could ever deliver while its summary side stays
+    unpopulated -- re-introduce routing/decomposition only once there's an
+    actual way to feed real documents into the summary index.
     """
     vector_index = load_vector_index(session_id)
     llm = get_local_llm()
-
-    if llm is None:
-        logger.info("Building vector-only query engine for session '%s'.", session_id)
-        return _vector_query_engine(vector_index, llm=None, max_sources=max_sources)
-
-    logger.info(
-        "Ollama available -- building full Router+SubQuestion engine for session '%s'.",
-        session_id,
-    )
-
-    vector_engine = _vector_query_engine(vector_index, llm, max_sources=max_sources)
-    summary_index = build_summary_index(session_id, llm, documents=None)
-    summary_engine = _summary_query_engine(summary_index, llm)
-    router = _router_query_engine(vector_engine, summary_engine, llm)
-    return _sub_question_engine(router, llm)
+    return _vector_query_engine(vector_index, llm, max_sources=max_sources)

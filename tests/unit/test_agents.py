@@ -1151,6 +1151,43 @@ class TestFaithfulnessRewrite:
         assert "Strong Section" not in call_messages[3].content  # only the weak one named
 
     @pytest.mark.asyncio
+    async def test_retries_until_section_passes_within_attempt_cap(self):
+        """A section still weak after one rewrite gets another attempt (up to
+        MAX_FAITHFULNESS_REWRITES) instead of giving up after a single try."""
+        from research_swarm.agents.writer import (
+            MAX_FAITHFULNESS_REWRITES,
+            _faithfulness_rewrite,
+        )
+
+        report = self._report()
+        rewrite_1 = FinalReport(title="T2", exec_summary="S2")
+        rewrite_2 = FinalReport(title="T3", exec_summary="S3")
+
+        structured_llm = MagicMock()
+        structured_llm.ainvoke = AsyncMock(side_effect=[rewrite_1, rewrite_2])
+
+        scores_by_call = [
+            [{"heading": "Weak Section", "score": 0.1, "citations": [1]}],  # initial
+            [{"heading": "Weak Section", "score": 0.2, "citations": [1]}],  # after rewrite 1 -- still weak
+            [{"heading": "Weak Section", "score": 0.9, "citations": [1]}],  # after rewrite 2 -- passes
+        ]
+
+        with patch(
+            "research_swarm.eval.faithfulness.score_sections", side_effect=scores_by_call
+        ):
+            result, score = await _faithfulness_rewrite(
+                report, [], structured_llm, MagicMock(), MagicMock()
+            )
+
+        assert MAX_FAITHFULNESS_REWRITES >= 2
+        assert result.title == "T3"
+        assert score == pytest.approx(0.9)
+        assert structured_llm.ainvoke.await_count == 2
+        # Second attempt's prior-report turn must reflect rewrite 1's output, not the original.
+        second_call_messages = structured_llm.ainvoke.await_args_list[1].args[0]
+        assert "T2" in second_call_messages[-2].content
+
+    @pytest.mark.asyncio
     async def test_scoring_failure_skips_rewrite(self):
         from research_swarm.agents.writer import _faithfulness_rewrite
 

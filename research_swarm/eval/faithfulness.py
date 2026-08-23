@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 
 # Minimum average cosine similarity between a section body and its cited
 # source snippets.  Below this the section is considered under-grounded.
-FAITHFULNESS_THRESHOLD = 0.25
+# Raised from 0.25 -- that bar was low enough that a real fraction of
+# under-grounded sections never triggered the writer's rewrite pass at all,
+# so faithfulness_rewrite (writer.py) rarely fired even when it should have.
+FAITHFULNESS_THRESHOLD = 0.45
 
 
 def _embed(texts: list[str]) -> list[list[float]]:

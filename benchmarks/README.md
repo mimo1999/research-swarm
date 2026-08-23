@@ -126,6 +126,51 @@ Fixes applied: grounding bug (Send payload), schema-in-prompt for all structured
 
 ---
 
+## Results — reranker model comparison (2026-08-23, seed 42) — current
+
+Rerun of `run_beir_reranker_compare.py` against all three reranker methods in
+one pass, same cached corpus embeddings as the 2026-07-21/22 run (SciFact's
+5,183-doc cache is byte-identical, so its dense baseline is unchanged). No
+production RAG/reranker code changed since that run — this rerun exists to
+confirm the comparison still holds after this session's unrelated writer/
+query-engine fixes, not because the reranker was touched.
+
+| Dataset | Dense nDCG@10 | ms-marco Δ | bge-base Δ | mxbai-xsmall Δ | Guard fires |
+|---|---|---|---|---|---|
+| SciFact | 0.7485 | -0.0021 | +0.0067 | **+0.0095** | 75 % |
+| NFCorpus | 0.3405 | +0.0153 | +0.0095 | **+0.0191** | 4 % |
+| ArguAna | 0.3907 | +0.0000 | +0.0000 | +0.0000 | 100 % |
+
+Reranker ranking (ms-marco < bge-base < mxbai-xsmall on Δ nDCG@10) is
+unchanged from the 2026-07-21/22 run below — `mxbai-rerank-xsmall-v1` still
+wins on quality everywhere it's exercised, `bge-reranker-base` still never
+regresses vs dense, and ArguAna's queries still hit the length guard 100% of
+the time. **Production reranker stays on `bge-reranker-base`** per the
+latency analysis in the 2026-07-22 section below — nothing here changes that
+call.
+
+NFCorpus and ArguAna's dense nDCG@10 baselines moved (0.3131→0.3405,
+0.4574→0.3907) versus the 2026-07-21/22 numbers despite loading the same
+cached corpus embeddings — the query *sample* differs run to run for those
+two datasets (their eligible-query pool sizes aren't fixed the way SciFact's
+apparently is), so seed 42 draws a different 100-query subset each time. This
+is a sampling-variance artifact of the benchmark script, not a retrieval
+regression; SciFact's number is reproduced exactly, confirming the underlying
+embeddings/ranking logic are unchanged.
+
+Timing (500/1,920 pairs, SciFact/NFCorpus): ms-marco 34s/131s, bge-base
+227s/887s, mxbai-xsmall 124s/500s. The ms-marco/bge-base ratio (~6-7x)
+matches the 2026-07-21/22 run, but mxbai-xsmall was markedly *faster* than
+bge-base this time (previously ~10x *slower*) — a big enough swing that it
+looks like a real difference in this run's environment (e.g. a cold vs.
+warm model-weights cache, CPU contention from another process) rather than
+normal noise, though the cause wasn't isolated here. Quality ranking is
+unaffected either way, and the latency-driven production choice stands, but
+the "mxbai is always ~10x slower" latency claim from 2026-07-22 shouldn't be
+treated as a fixed constant until this is re-checked on a quiet machine.
+
+Results saved: `data/benchmark_results/beir-reranker-compare-20260823-151605.json`.
+
 ## Results — reranker model comparison (2026-07-21/22, seed 42)
 
 **Production reranker (`research_swarm/rag/reranker.py`) switched from

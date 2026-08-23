@@ -415,26 +415,26 @@ class TestGetResearchQueryEngine:
 
     @patch("research_swarm.rag.query_engines.load_vector_index")
     @patch("research_swarm.rag.query_engines.get_local_llm")
-    @patch("research_swarm.rag.query_engines.build_summary_index")
-    @patch("research_swarm.rag.query_engines.RouterQueryEngine")
-    @patch("research_swarm.rag.query_engines.SubQuestionQueryEngine")
-    def test_returns_subq_engine_when_ollama_up(
-        self, mock_subq, mock_router, mock_summary, mock_llm_fn, mock_vi
-    ):
+    def test_returns_vector_engine_when_ollama_up(self, mock_llm_fn, mock_vi):
+        """Ollama being reachable must NOT route through Router/SubQuestion --
+        that stack was removed after both layers made retrieval strictly less
+        reliable than the plain vector engine: the summary side was always
+        empty (build_summary_index(..., documents=None) unconditionally), the
+        router's LLM selector had no way to know that and routed a real
+        fraction of queries into it anyway, and SubQuestionQueryEngine.
+        from_defaults() unconditionally required an uninstallable package.
+        get_research_query_engine must always return a plain vector engine,
+        with LLM synthesis (response_mode="compact") when Ollama is up."""
         mock_llm_fn.return_value = MagicMock()  # Ollama available
         mock_index = MagicMock()
-        mock_index.as_query_engine.return_value = MagicMock()
+        mock_engine = MagicMock()
+        mock_index.as_query_engine.return_value = mock_engine
         mock_vi.return_value = mock_index
-
-        mock_summary_index = MagicMock()
-        mock_summary_index.as_query_engine.return_value = MagicMock()
-        mock_summary.return_value = mock_summary_index
-
-        mock_router.return_value = MagicMock()
-        mock_subq_engine = MagicMock()
-        mock_subq.from_defaults.return_value = mock_subq_engine
 
         from research_swarm.rag.query_engines import get_research_query_engine
         engine = get_research_query_engine("sess-2")
-        mock_subq.from_defaults.assert_called_once()
-        assert engine is mock_subq_engine
+
+        call_kwargs = mock_index.as_query_engine.call_args.kwargs
+        assert call_kwargs.get("response_mode") == "compact"
+        assert call_kwargs.get("llm") is mock_llm_fn.return_value
+        assert engine is mock_engine

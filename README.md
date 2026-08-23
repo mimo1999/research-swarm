@@ -105,7 +105,7 @@ All settings are overridable from the sidebar at runtime.
 | **Dual budget pools** | LLM calls split into a **research** pool (document/web workers — the part that can genuinely run away across rounds) and a smaller **review** pool (critic/fact-checker/writer/judge). A research-loop overrun degrades gracefully instead of starving the review stage of the budget it needs to produce a real report. |
 | **JSON-repair recovery** | Structured-output failures caused by unescaped backslashes (e.g. raw LaTeX in a claim breaking `json.loads`) are repaired and reparsed instead of discarding a real, already-generated answer. |
 | **Cross-encoder reranker** | `bge-reranker-base` (CPU, 280 MB) reranks RAG chunks by relevance before returning to the researcher. |
-| **Faithfulness check** | BGE embeddings score each report section against its cited snippets; triggers a rewrite if grounding is too low. |
+| **Faithfulness check** | BGE embeddings score each report section against its cited snippets; sections scoring below threshold get a targeted rewrite, retried up to 3 times (re-scoring and re-targeting only sections still weak each pass) before the writer moves on. |
 | **SSRF protection** | URL fetcher validates every hop against a private-IP blocklist; fetched content is sanitised for prompt-injection patterns. |
 | **Schema migration** | `migrate_state()` upgrades v0/v1 checkpoints to the current schema on resume - no manual DB work needed. |
 
@@ -113,24 +113,24 @@ All settings are overridable from the sidebar at runtime.
 
 ## Retrieval Quality (BEIR)
 
-RAG retrieval evaluated on three [BEIR](https://github.com/beir-cellar/beir) datasets (seed 42, 100 queries each). Metric: **nDCG@10**.
+RAG retrieval evaluated on three [BEIR](https://github.com/beir-cellar/beir) datasets (seed 42, 100 queries each, last rerun 2026-08-23). Metric: **nDCG@10**.
 
 | Dataset | BM25 ¹ | Contriever ¹ | BGE-Large ¹ | **Ours (BGE-small, dense)** | **Ours (+ reranker)** |
 |---|---|---|---|---|---|
 | SciFact | 0.678 | 0.677 | 0.752 | **0.749** | **0.755** |
-| NFCorpus | 0.321 | 0.328 | 0.381 | 0.341 | **0.321** |
-| ArguAna | 0.397 | 0.446 | 0.416 | **0.391** | **0.391** |
+| NFCorpus | 0.321 | 0.328 | 0.381 | **0.341** | **0.350** |
+| ArguAna | 0.397 | 0.446 | 0.416 | 0.391 | 0.391 |
 
 ¹ Published baselines from the [BEIR paper](https://arxiv.org/abs/2104.08663) and [Resources for Brewing BEIR](https://arxiv.org/abs/2306.07471). BGE-Large is `bge-large-en-v1.5`; our embedder is the much smaller `bge-small-en-v1.5` (~130 MB vs ~1.3 GB).
 
-The cross-encoder reranker (`bge-reranker-base`, swapped in from `ms-marco-MiniLM-L-6-v2`) is guarded: skipped for queries longer than 8 words (most scientific queries) to avoid out-of-distribution degradation. It never regresses nDCG@10 versus dense retrieval alone across the three BEIR sets, but is ~6x slower on CPU than the smaller ms-marco model it replaced and loses to it on NFCorpus's short keyword queries. See [`benchmarks/README.md`](benchmarks/README.md) for the full per-dataset breakdown and the reasoning behind the model choice.
+The cross-encoder reranker (`bge-reranker-base`, swapped in from `ms-marco-MiniLM-L-6-v2`) is guarded: skipped for queries longer than 8 words (most scientific queries) to avoid out-of-distribution degradation. It never regresses nDCG@10 versus dense retrieval alone across the three BEIR sets, but is markedly slower on CPU than the smaller ms-marco model it replaced and loses to it on NFCorpus's short keyword queries. See [`benchmarks/README.md`](benchmarks/README.md) for the full per-dataset breakdown, reranker latency comparison, and the reasoning behind the model choice.
 
 ---
 
 ## Development
 
 ```bash
-# Run all 348 tests (fully offline - all LLMs mocked)
+# Run all 349 tests (fully offline - all LLMs mocked)
 poetry run pytest
 
 # Specific test file

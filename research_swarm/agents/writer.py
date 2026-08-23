@@ -240,6 +240,15 @@ def _attach_quality_score(report: FinalReport, faithfulness: float | None) -> Fi
     return report.model_copy(update={"quality_score": quality_score})
 
 
+# Maximum rewrite attempts if sections remain under-grounded. A single
+# attempt left a real fraction of weak sections unfixed -- the model doesn't
+# always resolve every flagged section in one pass, especially when several
+# are weak at once. Looping (targeting only the sections still weak each
+# time) gives it more chances before giving up, bounded so a stubbornly
+# under-grounded report can't loop forever.
+MAX_FAITHFULNESS_REWRITES = 3
+
+
 async def _faithfulness_rewrite(
     report: FinalReport,
     references: list[Source],
@@ -247,13 +256,16 @@ async def _faithfulness_rewrite(
     system_msg: SystemMessage,
     original_user_msg: HumanMessage,
 ) -> tuple[FinalReport, float | None]:
-    """Return (report, faithfulness_score); rewrite once if the score is too low.
+    """Return (report, faithfulness_score); rewrite (up to MAX_FAITHFULNESS_REWRITES
+    times) while sections remain under-grounded.
 
-    The rewrite call includes the report it's being asked to fix (as a prior
+    Each rewrite call includes the report it's being asked to fix (as a prior
     AI turn) and names the specific under-grounded sections. Without this, the
     model has no way to know what it wrote or which part was flagged -- it
     would just regenerate blind from the original findings, which is as
-    likely to reproduce the same gaps as fix them.
+    likely to reproduce the same gaps as fix them. Each subsequent attempt
+    re-scores and re-targets only whatever sections are still weak, so a
+    section fixed on attempt 1 isn't re-flagged on attempt 2.
 
     Returns the score alongside the report -- rather than just the report and
     making the caller recompute it -- since this function already runs the
@@ -273,43 +285,59 @@ async def _faithfulness_rewrite(
         logger.warning("Faithfulness scoring failed (%s) — skipping rewrite.", exc)
         return report, None
 
-    weak_sections = [s for s in section_scores if s["score"] < FAITHFULNESS_THRESHOLD]
     overall = (
         sum(s["score"] for s in section_scores) / len(section_scores)
         if section_scores else 1.0
     )
     logger.info("Faithfulness score: %.3f (threshold=%.2f)", overall, FAITHFULNESS_THRESHOLD)
-    if not weak_sections:
-        return report, overall
 
-    weak_headings = ", ".join(f"{s['heading']!r} ({s['score']:.2f})" for s in weak_sections)
-    logger.warning(
-        "Faithfulness %.3f < %.2f on %d section(s) [%s] — requesting targeted rewrite.",
-        overall, FAITHFULNESS_THRESHOLD, len(weak_sections), weak_headings,
-    )
-    previous_report_msg = AIMessage(content=report.model_dump_json())
-    rewrite_msg = HumanMessage(
-        content=(
-            f"The report above scored below the faithfulness threshold "
-            f"({FAITHFULNESS_THRESHOLD}) on these section(s): {weak_headings}.  "
-            "Rewrite ONLY those sections so every claim is directly supported by "
-            "the cited source snippets from the evidence above -- remove or qualify "
-            "any claim that lacks clear support.  Leave all other sections exactly "
-            "as they are.  Return the full corrected report in the same JSON format."
+    current_report = report
+    current_messages = [system_msg, original_user_msg]
+
+    for attempt in range(1, MAX_FAITHFULNESS_REWRITES + 1):
+        weak_sections = [s for s in section_scores if s["score"] < FAITHFULNESS_THRESHOLD]
+        if not weak_sections:
+            return current_report, overall
+
+        weak_headings = ", ".join(f"{s['heading']!r} ({s['score']:.2f})" for s in weak_sections)
+        logger.warning(
+            "Faithfulness %.3f < %.2f on %d section(s) [%s] — requesting targeted "
+            "rewrite (attempt %d/%d).",
+            overall, FAITHFULNESS_THRESHOLD, len(weak_sections), weak_headings,
+            attempt, MAX_FAITHFULNESS_REWRITES,
         )
-    )
-    try:
-        rewritten: FinalReport = await structured_llm.ainvoke(
-            [system_msg, original_user_msg, previous_report_msg, rewrite_msg]
+        previous_report_msg = AIMessage(content=current_report.model_dump_json())
+        rewrite_msg = HumanMessage(
+            content=(
+                f"The report above scored below the faithfulness threshold "
+                f"({FAITHFULNESS_THRESHOLD}) on these section(s): {weak_headings}.  "
+                "Rewrite ONLY those sections so every claim is directly supported by "
+                "the cited source snippets from the evidence above -- remove or qualify "
+                "any claim that lacks clear support.  Leave all other sections exactly "
+                "as they are.  Return the full corrected report in the same JSON format."
+            )
         )
-        rewritten = rewritten.model_copy(update={"references": references})
-        rewritten_scores = score_sections(rewritten, references)
-        rewritten_overall = (
-            sum(s["score"] for s in rewritten_scores) / len(rewritten_scores)
-            if rewritten_scores else 1.0
-        )
-        logger.info("Rewrite faithfulness: %.3f", rewritten_overall)
-        return rewritten, rewritten_overall
-    except Exception as exc:
-        logger.warning("Faithfulness rewrite failed (%s) — keeping original.", exc)
-        return report, overall
+        current_messages = current_messages + [previous_report_msg, rewrite_msg]
+        try:
+            rewritten: FinalReport = await structured_llm.ainvoke(current_messages)
+            rewritten = rewritten.model_copy(update={"references": references})
+            rewritten_scores = score_sections(rewritten, references)
+            rewritten_overall = (
+                sum(s["score"] for s in rewritten_scores) / len(rewritten_scores)
+                if rewritten_scores else 1.0
+            )
+            logger.info(
+                "Rewrite %d/%d faithfulness: %.3f",
+                attempt, MAX_FAITHFULNESS_REWRITES, rewritten_overall,
+            )
+            current_report = rewritten
+            section_scores = rewritten_scores
+            overall = rewritten_overall
+        except Exception as exc:
+            logger.warning(
+                "Faithfulness rewrite attempt %d/%d failed (%s) — keeping last good report.",
+                attempt, MAX_FAITHFULNESS_REWRITES, exc,
+            )
+            return current_report, overall
+
+    return current_report, overall
