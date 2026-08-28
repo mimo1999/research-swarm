@@ -1,6 +1,20 @@
+---
+title: Multi-Agent Research Swarm
+emoji: 🔬
+colorFrom: blue
+colorTo: purple
+sdk: streamlit
+app_file: app.py
+pinned: false
+license: mit
+short_description: LangGraph multi-agent research swarm with critique, fact-checking, and RAG.
+---
+
 # 🔬 Multi-Agent Research Swarm
 
 A LangGraph-based autonomous research system. Give it a topic; a swarm of specialised AI agents researches it, critiques the findings, fact-checks every claim, and writes a structured report - with optional human review before the final draft.
+
+**Live demo:** [huggingface.co/spaces/maitreya18/research-swarm](https://huggingface.co/spaces/maitreya18/research-swarm)
 
 Built with **LangGraph 1.2**, **LlamaIndex**, **ChromaDB**, and **Streamlit**.
 
@@ -49,6 +63,39 @@ poetry run streamlit run app.py
 ```
 
 Windows: double-click `start.bat` - checks deps, optionally starts Ollama, opens the browser.
+
+---
+
+## Deploy to Hugging Face Spaces
+
+This repo's README carries the frontmatter block (`sdk: streamlit`, `app_file: app.py`) a Spaces build reads directly — pushing this repo to a new Space is enough to build it, once the following are set:
+
+**Space secrets** (Settings → Repository secrets) — the process defaults below assume a local Ollama daemon, which does not exist inside a Space container, so every provider field needs an explicit override:
+
+```ini
+ANTHROPIC_API_KEY=...             # or OPENAI_API_KEY
+TAVILY_API_KEY=...                # required for web search
+DEFAULT_MODEL_PROVIDER=anthropic  # or openai — never ollama on a Space
+TIER_FAST_PROVIDER=anthropic
+TIER_STANDARD_PROVIDER=anthropic
+TIER_THOROUGH_PROVIDER=anthropic
+```
+
+`TIER_STANDARD_PROVIDER` also gets overridden per-session by whatever provider is selected in the sidebar (see `get_tiered_llm`'s worker-tier override) — but `TIER_FAST_PROVIDER`/`TIER_THOROUGH_PROVIDER` (critic/fact-checker and supervisor/writer) do **not** follow the UI selection, so they must be set explicitly or those nodes will still try to reach `localhost:11434` and fail on a Space.
+
+**Space variables** (Settings → Variables, non-secret) — Spaces storage is ephemeral, so proactive cleanup replaces the "click delete" a hosted single-user server doesn't get:
+
+```ini
+DATA_DIR=/tmp/research_swarm_space
+SPACE_MODE=true
+SPACE_RETENTION_SECONDS=21600      # 6h — sessions older than this are pruned at startup
+SPACE_MAX_SESSIONS=40              # oldest-first cap beyond retention
+SPACE_MAX_CONCURRENT_RUNS=4        # in-process cap on simultaneous graph runs
+```
+
+`SPACE_MODE=true` is what turns on both the startup session-pruning pass (`app.py::_prune_sessions_once`) and the concurrency cap (`app.py::_RUN_SEMAPHORE`) — both are no-ops otherwise, so a local `poetry run streamlit run app.py` is unaffected by any of this.
+
+If the Space's build doesn't use Poetry, `requirements.txt` at the repo root (hand-maintained in parallel with `pyproject.toml`'s dependency list) covers a plain `pip install -r requirements.txt`.
 
 ---
 
