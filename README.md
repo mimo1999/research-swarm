@@ -1,16 +1,4 @@
----
-title: Multi-Agent Research Swarm
-emoji: 🔬
-colorFrom: blue
-colorTo: purple
-sdk: streamlit
-app_file: app.py
-pinned: false
-license: mit
-short_description: LangGraph multi-agent research swarm with critique, fact-checking, and RAG.
----
-
-# 🔬 Multi-Agent Research Swarm
+# Multi-Agent Research Swarm
 
 A LangGraph-based autonomous research system. Give it a topic; a swarm of specialised AI agents researches it, critiques the findings, fact-checks every claim, and writes a structured report - with optional human review before the final draft.
 
