@@ -146,6 +146,37 @@ def test_partial_credentials_fall_back_per_field():
         settings.anthropic_api_key = original
 
 
+def test_ollama_falls_back_to_server_key():
+    """No session-supplied Ollama key -> the server's own (Ollama Cloud, direct)."""
+    from pydantic import SecretStr
+
+    from research_swarm.config import settings
+
+    original = settings.ollama_api_key
+    try:
+        settings.ollama_api_key = SecretStr("server-ollama-key")
+        assert resolve_api_key("ollama") == "server-ollama-key"
+        with session_scope("unbound-session"):
+            assert resolve_api_key("ollama") == "server-ollama-key"
+    finally:
+        settings.ollama_api_key = original
+
+
+def test_ollama_session_key_beats_server_key():
+    from pydantic import SecretStr
+
+    from research_swarm.config import settings
+
+    original = settings.ollama_api_key
+    try:
+        settings.ollama_api_key = SecretStr("server-ollama-key")
+        bind_session("s1", SessionCredentials(ollama_api_key="user-ollama-key"))
+        with session_scope("s1"):
+            assert resolve_api_key("ollama") == "user-ollama-key"
+    finally:
+        settings.ollama_api_key = original
+
+
 def test_ollama_overrides_resolve_per_session():
     bind_session(
         "s1",
@@ -242,12 +273,42 @@ def test_get_agent_llm_ollama_uses_session_url_and_token():
 
 
 def test_get_agent_llm_ollama_sends_no_auth_header_without_a_token():
+    """No session key AND no server key (settings.ollama_api_key) -> no
+    auth header. Explicitly clears the server key rather than assuming
+    it's empty -- a real local .env (e.g. for Ollama Cloud) would otherwise
+    make this test's outcome depend on the developer's machine."""
+    from pydantic import SecretStr
+
     from research_swarm.agents import base
+    from research_swarm.config import settings
 
-    with patch("langchain_ollama.ChatOllama") as mock_cls:
-        base.get_agent_llm(provider="ollama", model="gemma4:e2b")
+    original = settings.ollama_api_key
+    try:
+        settings.ollama_api_key = SecretStr("")
+        with patch("langchain_ollama.ChatOllama") as mock_cls:
+            base.get_agent_llm(provider="ollama", model="gemma4:e2b")
+        assert mock_cls.call_args.kwargs["client_kwargs"] == {}
+    finally:
+        settings.ollama_api_key = original
 
-    assert mock_cls.call_args.kwargs["client_kwargs"] == {}
+
+def test_get_agent_llm_ollama_uses_server_key_when_unbound():
+    """Ollama Cloud, direct: a deployment's own key, not a per-user one."""
+    from pydantic import SecretStr
+
+    from research_swarm.agents import base
+    from research_swarm.config import settings
+
+    original = settings.ollama_api_key
+    try:
+        settings.ollama_api_key = SecretStr("server-ollama-key")
+        with patch("langchain_ollama.ChatOllama") as mock_cls:
+            base.get_agent_llm(provider="ollama", model="nemotron-3-nano:30b-cloud")
+        assert mock_cls.call_args.kwargs["client_kwargs"] == {
+            "headers": {"Authorization": "Bearer server-ollama-key"}
+        }
+    finally:
+        settings.ollama_api_key = original
 
 
 def test_tiered_standard_model_follows_session_deployment():

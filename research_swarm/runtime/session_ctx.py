@@ -169,9 +169,10 @@ def resolve_api_key(provider: str) -> str:
     if provider == "openai":
         return credentials.openai_api_key or settings.openai_api_key.get_secret_value()
     if provider == "ollama":
-        # Ollama has no server-side key setting -- a local daemon needs none and
-        # the hosted service is authenticated per user.
-        return credentials.ollama_api_key
+        # A local daemon needs no key. A server-wide key here means the
+        # deployment runs against Ollama Cloud directly (no local daemon at
+        # all) -- see settings.ollama_api_key.
+        return credentials.ollama_api_key or settings.ollama_api_key.get_secret_value()
     return ""
 
 

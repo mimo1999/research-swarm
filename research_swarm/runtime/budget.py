@@ -1,25 +1,34 @@
-"""Per-session, per-pool LLM call budget guard.
+"""Per-session, per-pool LLM call budget guard, plus a session-wide token cap.
 
 Counts LLM invocations via a LangChain callback handler and raises
-``BudgetExceeded`` when a pool's limit is hit.  Each graph node calls
-``get_budget(session_id, pool=...).check()`` before invoking the LLM so
-that a runaway session is terminated gracefully rather than silently
-burning through cloud credits.
+``BudgetExceeded`` when a pool's call limit -- or the session's token
+limit -- is hit.  Each graph node calls ``get_budget(session_id,
+pool=...).check()`` before invoking the LLM so that a runaway session is
+terminated gracefully rather than silently burning through cloud credits.
 
-Two pools, so that the part of the graph that can genuinely run away (the
-dispatch/worker research loop -- multiple rounds, multiple tool turns per
-worker) doesn't starve the part that can't (critic/fact-checker/writer are
-each one or a few batched calls, not an open-ended loop). Without this
-split, a worker-loop overrun exhausts the *shared* budget before critic
-ever runs, and every downstream node force-degrades in the same breath --
-producing a completely empty report even when the worker loop gathered
-good findings before it ran out.
+Two pools for the CALL-count limit, so that the part of the graph that can
+genuinely run away (the dispatch/worker research loop -- multiple rounds,
+multiple tool turns per worker) doesn't starve the part that can't
+(critic/fact-checker/writer are each one or a few batched calls, not an
+open-ended loop). Without this split, a worker-loop overrun exhausts the
+*shared* budget before critic ever runs, and every downstream node
+force-degrades in the same breath -- producing a completely empty report
+even when the worker loop gathered good findings before it ran out.
 
   "research" -- supervisor, document pass/workers, dispatch/worker loop.
                 Bounded by settings.max_llm_calls.
   "review"   -- critic, fact-checker, writer, LLM judge. Bounded by
                 settings.max_review_llm_calls, independently of whatever
                 the research pool used.
+
+The TOKEN limit (settings.max_tokens_per_session) is deliberately NOT
+split the same way: a call's token cost varies wildly with tool-loop
+context length and reasoning output, so "N calls" doesn't bound actual
+spend the way it does for a pool with predictable per-call cost. It's
+checked as one running total across BOTH pools for the session -- see
+session_total_tokens() -- because the thing it protects (a shared,
+rate-limited account, e.g. Ollama Cloud's allowance) doesn't care which
+pool the tokens came from.
 
 Usage in a node::
 
@@ -51,16 +60,32 @@ _registry_lock = threading.Lock()
 
 
 class BudgetExceeded(RuntimeError):
-    """Raised when a session's pool has consumed its LLM call budget."""
+    """Raised when a session has consumed its LLM call budget (per-pool) or
+    its token budget (session-wide, across pools -- see ``kind``)."""
 
-    def __init__(self, session_id: str, used: int, limit: int, pool: str = _DEFAULT_POOL) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        used: int,
+        limit: int,
+        pool: str = _DEFAULT_POOL,
+        *,
+        kind: str = "calls",
+    ) -> None:
         self.session_id = session_id
         self.used = used
         self.limit = limit
         self.pool = pool
-        super().__init__(
-            f"Session {session_id!r} exceeded {pool!r} budget: {used}/{limit} LLM calls used."
-        )
+        self.kind = kind  # "calls" (this pool only) or "tokens" (session-wide)
+        if kind == "tokens":
+            super().__init__(
+                f"Session {session_id!r} exceeded its session-wide token budget: "
+                f"{used}/{limit} tokens used."
+            )
+        else:
+            super().__init__(
+                f"Session {session_id!r} exceeded {pool!r} budget: {used}/{limit} LLM calls used."
+            )
 
 
 class _BudgetCallback(BaseCallbackHandler):
@@ -150,10 +175,20 @@ class BudgetGuard:
             return self._input_tokens + self._output_tokens
 
     def check(self) -> None:
-        """Raise ``BudgetExceeded`` if the limit has already been reached."""
+        """Raise ``BudgetExceeded`` if this pool's call limit, or the
+        session's token limit (across both pools), has been reached."""
         with self._lock:
             if self._count >= self.limit:
                 raise BudgetExceeded(self.session_id, self._count, self.limit, self.pool)
+        # Token budget is session-wide (spans both pools), so it's read
+        # outside this guard's own lock -- see session_total_tokens().
+        from research_swarm.config import settings  # lazy to avoid circulars
+
+        total = session_total_tokens(self.session_id)
+        if total >= settings.max_tokens_per_session:
+            raise BudgetExceeded(
+                self.session_id, total, settings.max_tokens_per_session, self.pool, kind="tokens",
+            )
 
     def reset(self) -> None:
         with self._lock:
@@ -197,6 +232,18 @@ _POOL_SETTING: dict[str, str] = {
     "research": "max_llm_calls",
     "review":   "max_review_llm_calls",
 }
+
+
+def session_total_tokens(session_id: str) -> int:
+    """Sum input+output tokens across every pool's guard for *session_id*.
+
+    The token budget is session-wide by design (see module docstring), so
+    this is what BudgetGuard.check() consults instead of any single pool's
+    own counter.
+    """
+    with _registry_lock:
+        guards = [g for (sid, _pool), g in _registry.items() if sid == session_id]
+    return sum(g.total_tokens for g in guards)
 
 
 def get_budget(session_id: str, limit: int | None = None, pool: str = _DEFAULT_POOL) -> BudgetGuard:

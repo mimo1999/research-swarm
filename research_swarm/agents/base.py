@@ -104,6 +104,7 @@ def get_agent_llm(
             temperature=temperature,
             base_url=resolve_ollama_base_url(),
             client_kwargs=client_kwargs,
+            reasoning=settings.ollama_reasoning or None,
         )
 
     raise ValueError(

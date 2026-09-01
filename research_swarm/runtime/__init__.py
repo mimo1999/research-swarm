@@ -1,5 +1,5 @@
 """Runtime utilities: budget guard, schema migrations, and session resources."""
-from .budget import BudgetExceeded, BudgetGuard, get_budget
+from .budget import BudgetExceeded, BudgetGuard, get_budget, session_total_tokens
 from .migrations import CURRENT_SCHEMA_VERSION, migrate_state
 from .session_ctx import (
     SessionCredentials,
@@ -10,7 +10,7 @@ from .session_ctx import (
 )
 
 __all__ = [
-    "BudgetExceeded", "BudgetGuard", "get_budget",
+    "BudgetExceeded", "BudgetGuard", "get_budget", "session_total_tokens",
     "CURRENT_SCHEMA_VERSION", "migrate_state",
     "SessionCredentials", "bind_session", "unbind_session",
     "session_scope", "current_credentials",
