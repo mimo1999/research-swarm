@@ -140,6 +140,49 @@ async def test_shutdown_cancels_in_flight_runs():
 
 
 # ---------------------------------------------------------------------------
+# Node update shaping
+# ---------------------------------------------------------------------------
+
+async def test_parallel_fanout_emits_one_event_per_task():
+    """dispatch_node's Send() fan-out can land several worker_node results in
+    the same superstep. LangGraph's `updates` stream mode then reports them
+    as a list of per-task update dicts under one node key instead of a
+    single dict (see map_output_updates in langgraph.pregel._io) -- this
+    used to crash update_jsonable with "'list' object has no attribute
+    'items'" the first time two workers actually finished together."""
+    graph = FakeGraph([
+        {"worker_node": [{"findings": ["a"]}, {"findings": ["b"]}]},
+    ])
+    run = await create_run("s1", {"topic": "x"}, hitl=False)
+
+    run.start(graph, {})
+    await run.task
+
+    assert run.state == "finished"
+    events = await _drain(run)
+    node_updates = [json.loads(e["data"]) for e in events if e["event"] == "node_update"]
+    assert node_updates == [
+        {"node": "worker_node", "update": {"findings": ["a"]}},
+        {"node": "worker_node", "update": {"findings": ["b"]}},
+    ]
+
+
+async def test_node_with_no_output_channel_writes_does_not_crash():
+    """A node that wrote to no observed output channel is reported as a bare
+    `None` for that step, not `{}` -- update_jsonable must tolerate it."""
+    graph = FakeGraph([{"dispatch_node": None}])
+    run = await create_run("s1", {"topic": "x"}, hitl=False)
+
+    run.start(graph, {})
+    await run.task
+
+    assert run.state == "finished"
+    events = await _drain(run)
+    node_updates = [json.loads(e["data"]) for e in events if e["event"] == "node_update"]
+    assert node_updates == [{"node": "dispatch_node", "update": {}}]
+
+
+# ---------------------------------------------------------------------------
 # Event log and replay
 # ---------------------------------------------------------------------------
 

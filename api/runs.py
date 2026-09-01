@@ -170,12 +170,23 @@ class ResearchRun:
             try:
                 async for chunk in graph.astream(initial_state, config, stream_mode="updates"):
                     for node_name, node_update in chunk.items():
-                        self.emit("node_update", {
-                            "node": node_name,
-                            "update": update_jsonable(node_update),
-                        })
-                        if node_name == "writer" and node_update.get("final_report"):
-                            self.emit("final_report", to_jsonable(node_update["final_report"]))
+                        # When multiple tasks for the same node resolve within
+                        # one superstep -- e.g. dispatch_node's Send() fan-out
+                        # to N parallel worker_node calls -- LangGraph reports
+                        # them as a list/tuple of per-task update dicts under
+                        # one node key instead of a single dict (see
+                        # map_output_updates in langgraph.pregel._io). Emit one
+                        # event per task so every consumer downstream (the SSE
+                        # client, update_jsonable) only ever sees a plain dict.
+                        is_multi = isinstance(node_update, (list, tuple))
+                        updates = node_update if is_multi else (node_update,)
+                        for update in updates:
+                            self.emit("node_update", {
+                                "node": node_name,
+                                "update": update_jsonable(update),
+                            })
+                            if node_name == "writer" and update and update.get("final_report"):
+                                self.emit("final_report", to_jsonable(update["final_report"]))
 
                 snapshot = await graph.aget_state(config)
                 if snapshot.next:

@@ -29,6 +29,15 @@ def to_jsonable(value: Any) -> Any:
     return str(value)
 
 
-def update_jsonable(update: dict) -> dict:
-    """Serialize a node update dict, dropping the noisy `messages` key."""
+def update_jsonable(update: dict | None) -> dict:
+    """Serialize a node update dict, dropping the noisy `messages` key.
+
+    LangGraph's `updates` stream mode reports a node that wrote to no
+    observed output channel as `None` (see map_output_updates in
+    langgraph.pregel._io) -- not every node write is guaranteed to land on a
+    channel the graph declares as output, so this is a legitimate case, not
+    an error.
+    """
+    if not update:
+        return {}
     return {k: to_jsonable(v) for k, v in update.items() if k != "messages"}
