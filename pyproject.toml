@@ -76,6 +76,15 @@ select = ["E", "F", "I", "UP"]
 "tests/**/*.py" = ["E501"]
 "docs/**/*.py" = ["E501"]
 "run_research.py" = ["E501"]
+"hf_space/**/*.py" = ["E501"]  # embedded CSS block; wrapping it hurts readability
+# These deliberately avoid Python 3.11+-only enum.StrEnum / datetime.UTC /
+# typing.NotRequired -- the Hugging Face Space's container image is pinned to
+# Python 3.10, and these files get bundled into that deployment alongside the
+# rest of research_swarm/.
+"research_swarm/utils/compat.py" = ["UP017", "UP036", "UP042"]
+"research_swarm/schemas/source.py" = ["UP017"]
+"research_swarm/persistence/sessions.py" = ["UP017"]
+"research_swarm/schemas/state.py" = ["UP035"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

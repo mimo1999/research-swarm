@@ -1,6 +1,6 @@
-from enum import StrEnum
-
 from pydantic import BaseModel, Field
+
+from research_swarm.utils.compat import StrEnum
 
 
 class ResearchDepth(StrEnum):

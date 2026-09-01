@@ -1,0 +1,56 @@
+# Hugging Face Space requirements -- Gradio UI only (no Streamlit/FastAPI).
+# Kept in sync by hand with the [project.dependencies] list in pyproject.toml;
+# streamlit / fastapi / uvicorn / sse-starlette / python-multipart are the
+# main project's OTHER two UIs and aren't needed here.
+#
+# gradio is capped at <=6.17.3 deliberately, not just <7.0.0: gradio 6.18.0
+# raised its huggingface-hub floor from >=0.33.5 to >=1.2.0 (and 6.20.0+ to
+# >=1.16.0), which is incompatible with every published transformers release
+# (transformers pins huggingface-hub<1.0, even as of 4.57.6) -- transformers
+# is pulled in transitively via sentence-transformers /
+# llama-index-embeddings-huggingface below. This produced a hard
+# ResolutionImpossible on the Space's build (confirmed against the actual
+# container logs), not just a local venv quirk. 6.17.3 is the newest gradio
+# release still on the huggingface-hub<2.0,>=0.33.5 floor.
+gradio>=6.0.0,<=6.17.3
+
+# LangGraph / LangChain
+langgraph>=0.2.0
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+langchain-anthropic>=0.2.0
+langchain-ollama>=1.1.0,<2.0.0
+
+# LlamaIndex RAG
+llama-index>=0.11.0
+llama-index-vector-stores-chroma>=0.3.0
+llama-index-embeddings-huggingface>=0.7.0,<0.8.0
+llama-index-llms-ollama>=0.10.1,<0.11.0
+chromadb>=0.5.0
+
+# Pydantic
+pydantic>=2.7.0
+pydantic-settings>=2.0.0
+
+# Tools
+tavily-python>=0.3.0
+arxiv>=2.1.0
+pypdf>=4.3.0
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+httpx>=0.27.0
+
+# Observability
+langsmith>=0.1.0
+
+# Persistence
+aiosqlite>=0.20.0
+langgraph-checkpoint-sqlite>=2.0.0
+
+# Report export
+markdown>=3.7
+
+# Utilities
+tiktoken>=0.7.0
+sentence-transformers>=4.0.0,<5.0.0
