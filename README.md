@@ -27,7 +27,7 @@ START → supervisor (plan + complexity score)
           ↓
         document_pass_node ──► document_worker_node × N  (one-time, per ingested doc)
           ↓ (bounces straight through when nothing was uploaded)
-        dispatch_node ──► worker_node × N  (parallel via Send, live web/arXiv/PubMed)
+        dispatch_node ──► worker_node × N  (parallel via Send, live web/arXiv/PubMed/Europe PMC)
           ↑                    ↓
           └── re-research  collect_node (stop-signal check + evidence persisted to RAG)
                                 ↓
@@ -52,7 +52,7 @@ START → supervisor (plan + complexity score)
 
 ## Quick Start
 
-**Requirements:** Python 3.11–3.14, [Poetry](https://python-poetry.org/docs/#installation), at least one LLM API key + Tavily for web search.
+**Requirements:** Python 3.11–3.14, [Poetry](https://python-poetry.org/docs/#installation), at least one LLM API key. Tavily is optional (enables general web search; arXiv/PubMed/Europe PMC work without it).
 
 ```bash
 git clone <repo-url> && cd swarm_agent_project
@@ -74,7 +74,7 @@ This repo's README carries the frontmatter block (`sdk: streamlit`, `app_file: a
 
 ```ini
 ANTHROPIC_API_KEY=...             # or OPENAI_API_KEY
-TAVILY_API_KEY=...                # required for web search
+TAVILY_API_KEY=...                # optional — enables general web search
 DEFAULT_MODEL_PROVIDER=anthropic  # or openai — never ollama on a Space
 TIER_FAST_PROVIDER=anthropic
 TIER_STANDARD_PROVIDER=anthropic
@@ -104,7 +104,7 @@ If the Space's build doesn't use Poetry, `requirements.txt` at the repo root (ha
 ```ini
 # .env - key settings (see .env.example for full list)
 ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY / leave blank for Ollama
-TAVILY_API_KEY=...             # required for web search
+TAVILY_API_KEY=...             # optional — enables general web search
 DEFAULT_MODEL_PROVIDER=anthropic  # anthropic | openai | ollama
 DEFAULT_MODEL_NAME=claude-sonnet-4-6
 DEFAULT_DEPTH=standard          # shallow | standard | deep
@@ -137,7 +137,7 @@ All settings are overridable from the sidebar at runtime.
 |---|---|
 | **Supervisor** | Creates the research plan: an *exact* sub-question count per depth (not a ceiling — an unenforced "at most N" let the model under-decompose comparison topics), worker-role assignments, and a complexity score. Explicitly required to cover every side of a "X vs Y"-style topic, not just one. Only LLM-invoked once per session. |
 | **Document workers** (×N) | One single-shot extraction pass per ingested document (or per size-bounded slice of an oversized one) before live research starts — no chunking, no retrieval, the model sees the full text. |
-| **Workers** (×N) | Parallel ReAct tool loops over web/arXiv/PubMed search - each researches one sub-question with a role-specific strategy (academic, industry, skeptic, benchmark, or general), routing to the tool that actually covers the sub-question's domain. |
+| **Workers** (×N) | Parallel ReAct tool loops over web/arXiv/PubMed/Europe PMC search - each researches one sub-question with a role-specific strategy (academic, industry, skeptic, benchmark, or general), routing to the tool that actually covers the sub-question's domain. Europe PMC also serves full-text XML for open-access biomedical papers, not just abstracts. |
 | **Critic** | Reviews findings in batches (one LLM call per `judge_batch_size` findings, run concurrently): `supported / weak / refuted`. Weak/refuted findings trigger another dispatch round, capped both by the overall round limit and a per-finding `max_rework_attempts`. |
 | **Fact-Checker** | Cross-checks claims against source snippets; adjusts confidence scores. Evidence-backed findings are floored at 0.15 so a mis-calibrated model can't zero out a claim that has real sources. |
 | **Writer** | Synthesises validated findings into a structured report, citing each source precisely rather than attaching a finding's whole source list to every sentence derived from it. Runs a per-section faithfulness check and rewrites only the sections that fall below threshold. |
@@ -203,3 +203,8 @@ poetry run python run_research.py "your topic here"
 | `anthropic` | `ANTHROPIC_API_KEY` | Claude Haiku (fast tier) / Sonnet (standard) / Opus (thorough). |
 | `openai` | `OPENAI_API_KEY` | GPT-4o-mini / GPT-4o. |
 | `ollama` | Ollama running locally | No API key. `start.bat` auto-starts `ollama serve`. Default: `gemma4:31b-cloud` (best grounding + faithfulness). |
+
+**Note:** general web search (Tavily) is optional, not required to run this project. Workers and the
+fetch pass fall back to arXiv, PubMed, and Europe PMC — all keyless — when `TAVILY_API_KEY` isn't
+set. Set it as an environment variable (`.env` locally, or a Space secret when deployed) only if you
+want general web-page results in addition to those three sources.
