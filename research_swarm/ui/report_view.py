@@ -6,23 +6,16 @@ from typing import TYPE_CHECKING
 
 import streamlit as st
 
+from research_swarm.ui.style import badge
+
 if TYPE_CHECKING:
     from research_swarm.schemas import FinalReport
 
-
-# ── Quality badge helpers ─────────────────────────────────────────────────────
-
-def _score_colour(score: float) -> str:
-    if score >= 0.75:
-        return "🟢"
-    if score >= 0.5:
-        return "🟡"
-    return "🔴"
-
-
-def _badge(label: str, score: float) -> str:
-    emoji = _score_colour(score)
-    return f"{emoji} **{label}**: {score:.0%}"
+_JUDGE_BADGE = {
+    "approve": ("APPROVE", "success"),
+    "revise":  ("REVISE", "warning"),
+    "reject":  ("REJECT", "danger"),
+}
 
 
 # ── Main render function ──────────────────────────────────────────────────────
@@ -31,7 +24,10 @@ def render_report(report: FinalReport) -> None:
     """Render a FinalReport in the Streamlit UI."""
     st.markdown(f"# {report.title}")
 
-    # Quality score row (only shown if scores were computed in Phase 5)
+    # Quality score row (only shown if scores were computed in Phase 5).
+    # relevance/completeness aren't computed anywhere yet -- show "Not
+    # computed" rather than a percentage, so an uncomputed dimension can't
+    # be misread as "computed and genuinely zero".
     if report.quality_score:
         qs = report.quality_score
         c1, c2, c3, c4 = st.columns(4)
@@ -42,19 +38,41 @@ def render_report(report: FinalReport) -> None:
         )
         c2.metric(
             "Relevance",
-            f"{qs.relevance:.0%}",
+            f"{qs.relevance:.0%}" if qs.relevance is not None else "Not computed",
             help="Avg cosine similarity to sub-questions",
         )
         c3.metric(
             "Completeness",
-            f"{qs.completeness:.0%}",
+            f"{qs.completeness:.0%}" if qs.completeness is not None else "Not computed",
             help="Fraction of sub-questions addressed",
         )
-        c4.metric("Overall", f"{qs.overall:.0%}", delta=None)
+        c4.metric(
+            "Overall", f"{qs.overall:.0%}", delta=None,
+            help="Average of the dimensions actually computed above",
+        )
+        st.divider()
+
+    # LLM-judge review (independent LLM read of the report, Phase 6)
+    if report.llm_judge:
+        judge = report.llm_judge
+        label, kind = _JUDGE_BADGE.get(
+            judge.verdict.value, (judge.verdict.value.upper(), "neutral"),
+        )
+        st.markdown(
+            f"**LLM Judge:** {badge(label, kind)} — {judge.overall:.1f}/5",
+            unsafe_allow_html=True,
+        )
+        j1, j2, j3, j4 = st.columns(4)
+        j1.metric("Coherence", f"{judge.coherence}/5")
+        j2.metric("Relevance", f"{judge.relevance}/5")
+        j3.metric("Completeness", f"{judge.completeness}/5")
+        j4.metric("Citation quality", f"{judge.citation_quality}/5")
+        with st.expander("Judge reasoning"):
+            st.markdown(judge.reasoning)
         st.divider()
 
     # Executive summary
-    with st.expander("📋 Executive Summary", expanded=True):
+    with st.expander("Executive Summary", expanded=True):
         st.markdown(report.exec_summary)
 
     # Sections
@@ -66,7 +84,7 @@ def render_report(report: FinalReport) -> None:
 
     # References
     if report.references:
-        with st.expander(f"📚 References ({len(report.references)})", expanded=False):
+        with st.expander(f"References ({len(report.references)})", expanded=False):
             for i, ref in enumerate(report.references, 1):
                 title = ref.title if hasattr(ref, "title") else ref.get("title", "")
                 url   = ref.url   if hasattr(ref, "url")   else ref.get("url",   "")
@@ -88,7 +106,7 @@ def render_report(report: FinalReport) -> None:
 
     # Methodology + limitations
     if report.methodology or report.limitations:
-        with st.expander("🔬 Methodology & Limitations", expanded=False):
+        with st.expander("Methodology & Limitations", expanded=False):
             if report.methodology:
                 st.markdown("**Methodology**")
                 st.markdown(report.methodology)
@@ -110,23 +128,25 @@ def _inline_citations(body: str, citation_nums: list[int], references: list) -> 
 
 def _render_downloads(report: FinalReport) -> None:
     """Render Markdown and HTML download buttons."""
-    st.markdown("#### ⬇️ Download Report")
+    st.markdown("#### Download Report")
     col1, col2 = st.columns(2)
 
     md_text  = _report_to_markdown(report)
     html_text = _report_to_html(md_text, report.title)
 
     col1.download_button(
-        label="📄 Download Markdown",
+        label="Download Markdown",
         data=md_text.encode("utf-8"),
         file_name=f"{_safe_filename(report.title)}.md",
         mime="text/markdown",
+        use_container_width=True,
     )
     col2.download_button(
-        label="🌐 Download HTML",
+        label="Download HTML",
         data=html_text.encode("utf-8"),
         file_name=f"{_safe_filename(report.title)}.html",
         mime="text/html",
+        use_container_width=True,
     )
 
 

@@ -17,15 +17,15 @@ _OLLAMA_CLOUD_MODELS = [
 ]
 
 _DEPTH_LABELS = {
-    ResearchDepth.shallow:  "⚡ Shallow  (fastest — 1 sub-question, 1 tool turn, no re-research)",
-    ResearchDepth.standard: "⚖️  Standard (balanced — 4 sub-questions, 3 tool turns)",
-    ResearchDepth.deep:     "🔬 Deep     (thorough — 6 sub-questions, 6 tool turns)",
+    ResearchDepth.shallow:  "Shallow  (fastest — 1 sub-question, 1 tool turn, no re-research)",
+    ResearchDepth.standard: "Standard (balanced — 4 sub-questions, 3 tool turns)",
+    ResearchDepth.deep:     "Deep     (thorough — 6 sub-questions, 6 tool turns)",
 }
 
 _PROVIDER_LABELS = {
-    "anthropic": "🟣 Anthropic (Claude)",
-    "openai":    "🟢 OpenAI (GPT)",
-    "ollama":    "🦙 Ollama",
+    "anthropic": "Anthropic (Claude)",
+    "openai":    "OpenAI (GPT)",
+    "ollama":    "Ollama",
 }
 
 _PROVIDERS = ["ollama", "anthropic", "openai"]
@@ -38,15 +38,14 @@ def render_sidebar() -> dict:
           uploaded_pdfs, extra_urls
     """
     with st.sidebar:
-        st.header("⚙️ Settings")
+        st.header("Settings")
 
         # ── LLM provider ──────────────────────────────────────────────
         st.subheader("Model")
-        provider = st.radio(
+        provider = st.selectbox(
             "Provider",
             _PROVIDERS,
             format_func=lambda x: _PROVIDER_LABELS[x],
-            horizontal=True,
             key="ui_provider",
         )
 
@@ -63,11 +62,10 @@ def render_sidebar() -> dict:
             # Both modes talk to the same local Ollama daemon (localhost:11434).
             # In cloud mode the daemon proxies requests to Ollama's cloud using
             # credentials stored by `ollama login` — no separate URL is needed.
-            ollama_deployment = st.radio(
+            ollama_deployment = st.selectbox(
                 "Deployment",
                 ["local", "cloud"],
-                format_func=lambda x: "💻 Local" if x == "local" else "☁️ Cloud",
-                horizontal=True,
+                format_func=lambda x: "Local" if x == "local" else "Cloud",
                 index=0 if settings.ollama_deployment == "local" else 1,
                 key="ui_ollama_deployment",
                 help=(
@@ -112,36 +110,32 @@ def render_sidebar() -> dict:
 
         # ── Research settings ─────────────────────────────────────────
         st.subheader("Research")
-        depth_key = st.select_slider(
+        depth_key = st.selectbox(
             "Depth",
             options=[ResearchDepth.shallow, ResearchDepth.standard, ResearchDepth.deep],
-            value=ResearchDepth.shallow,
             format_func=lambda d: _DEPTH_LABELS[d],
             key="ui_depth",
         )
-        max_sources = st.slider(
-            "Max sources", min_value=3, max_value=30, value=settings.max_sources, step=1,
-            key="ui_max_sources",
-        )
 
-        st.divider()
-
-        # ── HITL toggle ───────────────────────────────────────────────
-        st.subheader("Human-in-the-Loop")
-        hitl_enabled = st.toggle(
-            "Pause before writing (HITL)",
-            value=True,
-            key="ui_hitl",
-            help=(
-                "If enabled, the graph pauses after fact-checking so you can "
-                "review findings before the report is written."
-            ),
-        )
+        with st.expander("Advanced", expanded=False):
+            max_sources = st.slider(
+                "Max sources", min_value=3, max_value=30, value=settings.max_sources, step=1,
+                key="ui_max_sources",
+            )
+            hitl_enabled = st.toggle(
+                "Pause before writing (HITL)",
+                value=True,
+                key="ui_hitl",
+                help=(
+                    "If enabled, the graph pauses after fact-checking so you can "
+                    "review findings before the report is written."
+                ),
+            )
 
         st.divider()
 
         # ── Document ingestion ────────────────────────────────────────
-        st.subheader("📎 Documents")
+        st.subheader("Documents")
         uploaded_pdfs = st.file_uploader(
             "Upload PDFs",
             type=["pdf"],
@@ -159,7 +153,7 @@ def render_sidebar() -> dict:
         st.divider()
 
         # ── Info ──────────────────────────────────────────────────────
-        st.caption("🔗 Multi-Agent Research Swarm · Phase 6")
+        st.caption("Multi-Agent Research Swarm")
 
     # Normalise model: for anthropic/openai the selectbox gives the value,
     # for ollama the text_input. All paths set `model` above.
@@ -194,16 +188,16 @@ def _render_ollama_local_status(base_url: str, model: str) -> None:
         data = _ollama_get(base_url, "/api/tags")
         names = [t.get("name", "") for t in data.get("models", [])]
         if model in names:
-            st.success(f"✅ Daemon reachable · **{model}** is pulled and ready")
+            st.success(f"Daemon reachable · **{model}** is pulled and ready")
         else:
             available = ", ".join(names[:5]) or "none"
             st.warning(
-                f"⚠️ Daemon reachable but **{model}** is not pulled.  \n"
+                f"Daemon reachable but **{model}** is not pulled.  \n"
                 f"Run `ollama pull {model}` to download it.  \n"
                 f"Available: {available}"
             )
     except Exception as exc:
-        st.error(f"❌ Cannot reach Ollama at `{base_url}` — {exc}")
+        st.error(f"Cannot reach Ollama at `{base_url}` — {exc}")
 
 
 def _render_ollama_cloud_status(base_url: str, model: str) -> None:
@@ -242,11 +236,11 @@ def _render_ollama_cloud_status(base_url: str, model: str) -> None:
             # disk still work, so don't mislead the user with "not logged in".
             login_line = "Login status: verified via `ollama login` on this machine"
         else:
-            login_line = "⚠️ Not logged in — run `ollama login` for cloud models"
+            login_line = "Not logged in — run `ollama login` for cloud models"
 
         if model in names:
             st.success(
-                f"✅ Daemon reachable · **{model}** available locally  \n"
+                f"Daemon reachable · **{model}** available locally  \n"
                 f"{login_line}"
             )
         else:
@@ -256,15 +250,15 @@ def _render_ollama_cloud_status(base_url: str, model: str) -> None:
             definitely_logged_out = not username and not whoami_unsupported
             if definitely_logged_out:
                 st.warning(
-                    f"⚠️ Daemon reachable · **{model}** not pulled locally  \n"
+                    f"Daemon reachable · **{model}** not pulled locally  \n"
                     f"{login_line}  \n"
                     "Log in first, or pull the model with `ollama pull`."
                 )
             else:
                 st.info(
-                    f"☁️ Daemon reachable · **{model}** not pulled locally  \n"
+                    f"Daemon reachable · **{model}** not pulled locally  \n"
                     f"{login_line}  \n"
                     "Will stream from ollama.com at inference time."
                 )
     except Exception as exc:
-        st.error(f"❌ Cannot reach Ollama daemon at `{base_url}` — {exc}")
+        st.error(f"Cannot reach Ollama daemon at `{base_url}` — {exc}")

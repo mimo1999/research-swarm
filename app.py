@@ -34,7 +34,7 @@ def _run(coro):
 # ── Page config (must be first Streamlit call) ────────────────────────────────
 st.set_page_config(
     page_title="Research Swarm",
-    page_icon="🔬",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -42,13 +42,12 @@ st.set_page_config(
 # ── Project imports ───────────────────────────────────────────────────────────
 from research_swarm.config import settings
 from research_swarm.graph.builder import build_graph, get_thread_config, make_async_checkpointer
-from research_swarm.rag.indexes import get_embed_model
 from research_swarm.runtime.budget import clear_budget
-from research_swarm.rag.ingestion import IngestionPipeline
 from research_swarm.schemas import ResearchQuery
 from research_swarm.ui.report_view import render_report
 from research_swarm.ui.sessions_view import render_sessions_tab
 from research_swarm.ui.sidebar import render_sidebar
+from research_swarm.ui.style import badge, inject_css
 from research_swarm.ui.trace import render_node_update, render_trace_header
 
 
@@ -84,6 +83,37 @@ def _get_graph(hitl: bool, _code_hash: str = ""):  # noqa: ARG001
     is no longer needed after edits.
     """
     return build_graph(checkpointer=_get_checkpointer(), interrupt_before_writer=hitl)
+
+
+@st.cache_resource(show_spinner=False)
+def _prune_sessions_once() -> int:
+    """Prune expired/excess sessions, once per server process (space_mode only).
+
+    @st.cache_resource makes this run exactly once per process lifetime no
+    matter how many times Streamlit reruns the script (every user
+    interaction reruns app.py top to bottom) or how many browser sessions
+    hit this server — a plain module-level call would otherwise re-scan the
+    checkpoint DB on every rerun for no benefit. No-ops (returns 0) unless
+    settings.space_mode is enabled, so local/dev runs are unaffected.
+    """
+    if not settings.space_mode:
+        return 0
+    from research_swarm.persistence.sessions import prune_expired_sessions
+    return prune_expired_sessions(
+        settings.space_retention_seconds, settings.space_max_sessions,
+    )
+
+
+# In-process cap on concurrent graph runs. Only meaningful in space_mode: a
+# public multi-tenant Space can have several browser sessions hitting one
+# server process at once, and each run holds the embedding + reranker models
+# in memory on top of its LLM calls -- unbounded concurrency there risks
+# exhausting a small Space's RAM. Harmless outside space_mode since a single
+# local user never contends on it. Not cached/session-scoped: it must be one
+# shared semaphore across the whole process, which is exactly what a plain
+# module-level object gives for free (module-level code runs once per
+# process on first import, unlike the rest of this script).
+_RUN_SEMAPHORE = threading.Semaphore(settings.space_max_concurrent_runs)
 
 
 # ── Session-state initialisation ──────────────────────────────────────────────
@@ -132,32 +162,63 @@ def _reset_run() -> None:
 
 # ── Ingestion helper ──────────────────────────────────────────────────────────
 
-def _ingest_documents(session_id: str, uploaded_pdfs: list, extra_urls: list[str]) -> int:
-    """Ingest PDFs and URLs into the session RAG index. Returns total chunks."""
-    if not uploaded_pdfs and not extra_urls:
-        return 0
+def _ingest_documents(uploaded_pdfs: list, extra_urls: list[str]) -> list[dict]:
+    """Extract full text from uploaded PDFs and URLs for the document pass.
 
-    pipeline = IngestionPipeline(session_id)
-    embed    = get_embed_model()
-    total    = 0
+    Returns a list of {url, title, text, source_type} dicts, stored on
+    AgentState.ingested_documents and consumed by document_pass_node /
+    document_worker_node -- one full-document extraction call per document,
+    no chunking, no embedding, no Chroma. See the per-document-worker plan.
+
+    fetch_url's own max_chars ceiling (20,000 -- its schema maximum) still
+    bounds how much of a web page can be retrieved here; PDFs aren't
+    similarly capped since load_pdf returns full per-page text for every
+    page it reads (up to its own max_pages=50 default).
+    """
+    if not uploaded_pdfs and not extra_urls:
+        return []
+
+    from research_swarm.tools.pdf_loader import load_pdf
+    from research_swarm.tools.url_fetcher import fetch_url
+
+    documents: list[dict] = []
 
     if uploaded_pdfs:
-        with st.spinner(f"Ingesting {len(uploaded_pdfs)} PDF(s) into RAG index…"):
+        with st.spinner(f"Reading {len(uploaded_pdfs)} PDF(s)…"):
             for uf in uploaded_pdfs:
                 with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
                     tmp.write(uf.read())
                     tmp_path = tmp.name
                 try:
-                    total += pipeline.ingest_pdf(tmp_path, embed)
+                    result = load_pdf.invoke({"file_path": tmp_path})
+                    text = "\n\n".join(
+                        c["text"] for c in result.get("chunks", []) if c.get("text")
+                    )
+                    if text:
+                        documents.append({
+                            "url":         result.get("url", tmp_path),
+                            "title":       result.get("title", ""),
+                            "text":        text,
+                            "source_type": "pdf",
+                        })
                 finally:
                     os.unlink(tmp_path)
 
     if extra_urls:
         with st.spinner(f"Fetching {len(extra_urls)} URL(s)…"):
             for url in extra_urls:
-                total += pipeline.ingest_url(url, embed)
+                result = fetch_url.invoke({"url": url, "max_chars": 20000})
+                snippet = result.get("snippet", "")
+                if snippet.startswith("["):
+                    continue  # fetch error placeholder -- skip
+                documents.append({
+                    "url":         result.get("url", url),
+                    "title":       result.get("title", ""),
+                    "text":        snippet,
+                    "source_type": "web",
+                })
 
-    return total
+    return documents
 
 
 # ── Graph streaming helpers ───────────────────────────────────────────────────
@@ -206,7 +267,16 @@ def _stream_graph(
         snapshot = await graph.aget_state(config)
         return bool(snapshot.next)  # non-empty `next` means paused at HITL
 
-    interrupted = _run(_collect())
+    # Bounds concurrent graph runs in space_mode (see _RUN_SEMAPHORE) --
+    # a no-op wait everywhere else, since the semaphore's default value
+    # matches settings.space_max_concurrent_runs only when space_mode
+    # actually gates it in; outside space_mode this still just acquires and
+    # releases a semaphore no one else contends on.
+    if settings.space_mode:
+        with _RUN_SEMAPHORE:
+            interrupted = _run(_collect())
+    else:
+        interrupted = _run(_collect())
 
     # Render collected updates in Streamlit's thread (safe for st.* calls)
     with trace_container:
@@ -227,7 +297,7 @@ def _stream_graph(
 def _render_hitl_panel(graph, config: dict, trace_container) -> None:
     """Render the human-review panel and handle Approve / Edit / Reject."""
     st.divider()
-    st.markdown("## 👤 Human Review Required")
+    st.markdown("## Human Review Required")
     st.info(
         "The graph has paused before writing. "
         "Review the findings below and choose how to proceed."
@@ -239,7 +309,11 @@ def _render_hitl_panel(graph, config: dict, trace_container) -> None:
     findings  = state_val.get("findings", [])
     critiques = state_val.get("critiques", [])
 
-    _verdict_map = {"supported": "✅", "weak": "⚠️", "refuted": "❌"}
+    _verdict_badge = {
+        "supported": ("SUPPORTED", "success"),
+        "weak":      ("WEAK", "warning"),
+        "refuted":   ("REFUTED", "danger"),
+    }
     critique_by_fid = {}
     for c in critiques:
         fid     = c.finding_id if hasattr(c, "finding_id") else c.get("finding_id", "")
@@ -247,38 +321,38 @@ def _render_hitl_panel(graph, config: dict, trace_container) -> None:
         v_str   = verdict.value if hasattr(verdict, "value") else str(verdict)
         critique_by_fid[fid] = v_str
 
-    with st.expander(f"📑 Findings ({len(findings)})", expanded=True):
+    with st.expander(f"Findings ({len(findings)})", expanded=True):
         for f in findings:
             fid   = f.id    if hasattr(f, "id")    else f.get("id", "")
             claim = f.claim if hasattr(f, "claim") else f.get("claim", "")
             conf  = f.confidence if hasattr(f, "confidence") else f.get("confidence", 0.5)
             sub_q = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
             verdict_str = critique_by_fid.get(fid, "pending")
-            emoji = _verdict_map.get(verdict_str, "❓")
-            st.markdown(
-                f"{emoji} **{sub_q}**  \n"
-                f"{claim}  \n"
-                f"*confidence: {conf:.2f}*"
-            )
-            st.markdown("---")
+            label, kind = _verdict_badge.get(verdict_str, ("PENDING", "neutral"))
+            with st.container(border=True):
+                st.markdown(
+                    f"{badge(label, kind)} &nbsp; **{sub_q}**", unsafe_allow_html=True,
+                )
+                st.markdown(claim)
+                st.caption(f"confidence: {conf:.2f}")
 
     # Feedback text box
     feedback = st.text_area(
-        "📝 Feedback for the writer (optional)",
+        "Feedback for the writer (optional)",
         placeholder="e.g. 'Focus more on economic impact. Exclude the speculative claims.'",
         key="hitl_feedback",
     )
 
     col1, col2, col3 = st.columns(3)
 
-    if col1.button("✅ Approve & Write", type="primary", use_container_width=True):
+    if col1.button("Approve & Write", type="primary", use_container_width=True):
         _resume_after_hitl(graph, config, trace_container, feedback or "Approved.")
 
-    if col2.button("✏️ Edit & Re-research", use_container_width=True):
+    if col2.button("Edit & Re-research", use_container_width=True):
         instructions = feedback or "Please re-research weak findings more thoroughly."
         _request_more_research(graph, config, instructions)
 
-    if col3.button("❌ Discard Session", use_container_width=True, type="secondary"):
+    if col3.button("Discard Session", use_container_width=True, type="secondary"):
         st.session_state.running     = False
         st.session_state.interrupted = False
         st.warning("Session discarded. Start a new query to try again.")
@@ -316,13 +390,12 @@ def _request_more_research(graph, config: dict, instructions: str) -> None:
 # ── Research tab ──────────────────────────────────────────────────────────────
 
 def render_research_tab(ui: dict) -> None:
-    st.markdown("## 🔬 Research")
-
     graph  = _get_graph(ui["hitl_enabled"], _code_hash=_agent_code_hash())
     config = get_thread_config(st.session_state.session_id or "init")
 
     # ── Interrupted state: show HITL panel ──
     if st.session_state.interrupted:
+        st.markdown("## Research")
         # Redraw the existing trace
         trace_ph = st.container()
         with trace_ph:
@@ -334,45 +407,67 @@ def render_research_tab(ui: dict) -> None:
 
     # ── Running state: show spinner ──
     if st.session_state.running:
-        st.info("⏳ Research is in progress…")
+        st.markdown("## Research")
+        st.info("Research is in progress…")
         return
 
     # ── Done: show success + report link ──
     if st.session_state.final_report:
-        st.success(f"✅ Report ready: **{st.session_state.final_report.title}**")
+        st.markdown("## Research")
+        st.success(f"Report ready: **{st.session_state.final_report.title}**")
         st.caption("Switch to the **Report** tab to read and download it.")
         # Replay trace (collapsed)
-        with st.expander("📜 View agent trace", expanded=False):
+        with st.expander("View agent trace", expanded=False):
             for node_name, update in st.session_state.agent_trace:
                 render_node_update(node_name, update)
-        if st.button("🔄 Start new research"):
+        if st.button("Start new research"):
             _reset_run()
             st.rerun()
         return
 
-    # ── Idle: show the query form ──
+    # ── Idle: show the hero landing state + query form ──
     _render_query_form(ui, graph)
 
 
 def _render_query_form(ui: dict, graph) -> None:
-    """Render the query input form and kick off the graph on submit."""
-    with st.form("research_form", clear_on_submit=False):
-        topic = st.text_input(
-            "Research topic",
-            placeholder="e.g.  Impact of large language models on drug discovery",
-            key="ui_topic",
+    """Render the idle-state hero heading and query input, then kick off the
+    graph on submit.
+
+    Centred in the middle of a 3-column split rather than full-width -- a
+    plain full-width form reads as "a settings page waiting to be filled in";
+    narrowing it and pairing it with a large heading reads as a deliberate
+    landing state, closer to a chat app's empty-conversation screen than a
+    web form.
+    """
+    _left, mid, _right = st.columns([1, 2, 1])
+    with mid:
+        st.markdown(
+            '<div class="rs-hero">'
+            "<h1>What should we research?</h1>"
+            "<p>Give it a topic and the swarm plans, researches, critiques, "
+            "fact-checks, and writes a cited report.</p>"
+            "</div>",
+            unsafe_allow_html=True,
         )
-        audience = st.selectbox(
-            "Audience",
-            ["general", "technical", "academic", "executive"],
-            index=1,
-            key="ui_audience",
-        )
-        submitted = st.form_submit_button(
-            "🚀 Start Research",
-            type="primary",
-            use_container_width=True,
-        )
+        with st.form("research_form", clear_on_submit=False):
+            topic = st.text_input(
+                "Research topic",
+                placeholder="e.g.  Impact of large language models on drug discovery",
+                key="ui_topic",
+                label_visibility="collapsed",
+            )
+            col_audience, col_submit = st.columns([3, 1], vertical_alignment="bottom")
+            audience = col_audience.selectbox(
+                "Audience",
+                ["general", "technical", "academic", "executive"],
+                index=1,
+                key="ui_audience",
+            )
+            submitted = col_submit.form_submit_button(
+                "Start Research",
+                type="primary",
+                use_container_width=True,
+            )
 
     if not submitted or not topic.strip():
         return
@@ -389,6 +484,13 @@ def _render_query_form(ui: dict, graph) -> None:
         max_sources=ui["max_sources"],
         audience=audience,
     )
+    # Extract full text from user-supplied documents up front -- consumed by
+    # document_pass_node (one full-document extraction call per document, no
+    # chunking/embedding/Chroma).
+    ingested_documents = _ingest_documents(ui["uploaded_pdfs"], ui["extra_urls"])
+    if ingested_documents:
+        st.toast(f"Loaded {len(ingested_documents)} document(s) for research.")
+
     initial_state = {
         "messages":            [],
         "query":               query,
@@ -405,12 +507,8 @@ def _render_query_form(ui: dict, graph) -> None:
         "model_provider":      ui["provider"],
         "model_name":          ui["model"],
         "schema_version":      1,
+        "ingested_documents":  ingested_documents,
     }
-
-    # Ingest user-supplied documents
-    chunks_added = _ingest_documents(session_id, ui["uploaded_pdfs"], ui["extra_urls"])
-    if chunks_added:
-        st.toast(f"✅ Ingested {chunks_added} chunk(s) into RAG index.")
 
     config = get_thread_config(session_id)
     st.session_state.running = True
@@ -437,10 +535,17 @@ def _render_query_form(ui: dict, graph) -> None:
 # ── Main app ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    inject_css()
+    _prune_sessions_once()
     _init_state()
 
-    st.title("🔬 Multi-Agent Research Swarm")
-    st.caption("Powered by LangGraph · LlamaIndex · Streamlit")
+    st.markdown(
+        '<div class="rs-header">'
+        "<span class=\"rs-header-name\">Multi-Agent Research Swarm</span>"
+        "<span class=\"rs-header-tag\">LangGraph · LlamaIndex · Streamlit</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
     st.divider()
 
     # Sidebar
@@ -448,7 +553,7 @@ def main() -> None:
 
     # Tabs
     tab_research, tab_report, tab_sessions = st.tabs(
-        ["🔍 Research", "📄 Report", "🗂️ Sessions"]
+        ["Research", "Report", "Sessions"]
     )
 
     with tab_research:
@@ -487,7 +592,7 @@ def main() -> None:
 
     # Error banner
     if st.session_state.error_msg:
-        st.error(f"⚠️ {st.session_state.error_msg}")
+        st.error(st.session_state.error_msg)
         if st.button("Clear error"):
             st.session_state.error_msg = None
             st.rerun()
