@@ -185,9 +185,13 @@ async def test_golden_coverage(fixture: dict):
             "messages": [],
         }
 
+    async def patched_fetch_worker_node(state):
+        return {"messages": []}
+
     with (
         patch.object(_nodes, "supervisor_node",    patched_supervisor_node),
         patch.object(_nodes, "worker_node",        patched_worker_node),
+        patch.object(_nodes, "fetch_worker_node",  patched_fetch_worker_node),
         patch.object(_nodes, "collect_node",       patched_collect_node),
         patch.object(_nodes, "critic_node",        patched_critic_node),
         patch.object(_nodes, "fact_checker_node",  patched_fact_checker_node),

@@ -95,6 +95,7 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
     sg.add_node("supervisor",           _nodes.supervisor_node)
     sg.add_node("document_pass_node",   _nodes.document_pass_node)
     sg.add_node("document_worker_node", _nodes.document_worker_node)
+    sg.add_node("fetch_worker_node",    _nodes.fetch_worker_node)
     sg.add_node("dispatch_node",        _nodes.dispatch_node)
     sg.add_node("worker_node",          _nodes.worker_node)
     sg.add_node("collect_node",         _nodes.collect_node)
@@ -114,8 +115,9 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
         {"document_pass_node": "document_pass_node", END: END},
     )
 
-    # document_pass_node → [document_worker_node × N] via Send fan-out, or a
-    # bounce straight to dispatch_node when there are no ingested documents
+    # document_pass_node → [document_worker_node × N] + [fetch_worker_node × N]
+    # via one Send fan-out (heterogeneous target nodes in one list), or a
+    # bounce straight to dispatch_node when there's no plan yet
     sg.add_conditional_edges(
         "document_pass_node",
         _nodes.route_from_document_pass,   # returns list[Send]
@@ -125,6 +127,10 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
     # merged by the findings reducer) for the normal round-0 sub-question
     # dispatch, which now skips any sub-question the document pass answered.
     sg.add_edge("document_worker_node", "dispatch_node")
+
+    # fetch_worker_node makes no LLM call and produces no findings -- it only
+    # deep-embeds search results into the session's RAG index before round 0.
+    sg.add_edge("fetch_worker_node", "dispatch_node")
 
     # dispatch_node → [worker_node × N]  via Send fan-out
     sg.add_conditional_edges(

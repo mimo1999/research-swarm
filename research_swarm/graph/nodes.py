@@ -43,8 +43,15 @@ from research_swarm.eval.llm_judge import judge_report
 from research_swarm.runtime.budget import BudgetExceeded, get_budget
 from research_swarm.schemas.state import AgentState
 from research_swarm.schemas.worker import WorkerRole
-from research_swarm.tools import arxiv_search, fetch_url, pubmed_search, web_search
+from research_swarm.tools import (
+    arxiv_search,
+    europe_pmc_search,
+    fetch_url,
+    pubmed_search,
+    web_search,
+)
 from research_swarm.tools.retriever_tool import build_retriever_tool
+from research_swarm.tools.web_search import is_configured as _tavily_configured
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +61,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _get_researcher_tools(max_sources: int | None = None, session_id: str | None = None):
-    tools = [web_search, arxiv_search, pubmed_search, fetch_url]
+    tools = [arxiv_search, pubmed_search, europe_pmc_search, fetch_url]
+    if _tavily_configured():
+        tools.insert(0, web_search)
     try:
         tools.append(build_retriever_tool(max_sources=max_sources, session_id=session_id))
     except Exception as exc:
@@ -158,12 +167,13 @@ def _check_budget(
         return None
     except BudgetExceeded as exc:
         logger.warning("%s: %s — forcing writer.", node_name, exc)
+        unit = f"{exc.pool} calls" if exc.kind == "calls" else "session tokens"
         return {
             "next_agent": "writer",
             "messages": [
                 AIMessage(
                     content=f"[{node_name}] Budget exceeded ({exc.used}/{exc.limit} "
-                            f"{exc.pool} calls); forcing report."
+                            f"{unit}); forcing report."
                 )
             ],
         }
@@ -305,20 +315,26 @@ def _dispatch_bounce_payload(state: AgentState) -> dict[str, Any]:
 
 
 def route_from_document_pass(state: AgentState):
-    """Return a list of Send objects — one per (document, part) to extract.
+    """Return a list of Send objects for the one-time pre-dispatch fan-out.
 
-    Bounces straight to dispatch_node (no document_worker_node calls) when
-    there are no ingested documents or no plan yet, exactly like
-    route_from_dispatch bounces straight to collect_node when there's
-    nothing to research.
+    Two independent kinds of Sends, mixed in one list (LangGraph supports a
+    single conditional edge fanning out to different target nodes):
+      - document_worker_node — one per (document, part), same as before.
+      - fetch_worker_node — one per plan sub-question, deep-fetching and
+        embedding search results into the session's RAG index BEFORE round-0
+        dispatch, so retrieve_from_rag has real substance from round 1
+        instead of only what workers' own live searches turn up mid-round.
+
+    "Has docs" and "has plan" are independent gates: a plan with no uploaded
+    documents still gets the fetch pass (nothing to extract, but still
+    something to search-and-embed). Only a missing plan bounces straight to
+    dispatch_node, same as always.
     """
     docs = state.get("ingested_documents") or []
     plan = state.get("plan")
 
-    if not docs or not plan or not plan.sub_questions:
+    if not plan or not plan.sub_questions:
         return [Send("dispatch_node", _dispatch_bounce_payload(state))]
-
-    from research_swarm.agents.document_worker import _split_into_parts
 
     session_id     = state.get("session_id", "default")
     model_provider = state.get("model_provider")
@@ -326,20 +342,32 @@ def route_from_document_pass(state: AgentState):
     sub_questions  = list(plan.sub_questions)
 
     sends = []
-    for doc in docs:
-        parts = _split_into_parts(doc.get("text", ""))
-        for i, part_text in enumerate(parts):
-            sends.append(Send("document_worker_node", {
-                "active_document":        doc,
-                "active_doc_part_text":   part_text,
-                "active_doc_part_index":  i,
-                "active_doc_part_total":  len(parts),
-                "sub_questions_snapshot": sub_questions,
-                "session_id":             session_id,
-                "model_provider":         model_provider,
-                "model_name":             model_name,
+
+    if docs:
+        from research_swarm.agents.document_worker import _split_into_parts
+
+        for doc in docs:
+            parts = _split_into_parts(doc.get("text", ""))
+            for i, part_text in enumerate(parts):
+                sends.append(Send("document_worker_node", {
+                    "active_document":        doc,
+                    "active_doc_part_text":   part_text,
+                    "active_doc_part_index":  i,
+                    "active_doc_part_total":  len(parts),
+                    "sub_questions_snapshot": sub_questions,
+                    "session_id":             session_id,
+                    "model_provider":         model_provider,
+                    "model_name":             model_name,
+                }))
+
+    if settings.enable_fetch_pass:
+        for sq in sub_questions:
+            sends.append(Send("fetch_worker_node", {
+                "active_fetch_query": sq,
+                "session_id":         session_id,
             }))
-    return sends
+
+    return sends or [Send("dispatch_node", _dispatch_bounce_payload(state))]
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +401,210 @@ async def document_worker_node(state: AgentState) -> dict[str, Any]:
         "findings": findings,
         "messages": [
             AIMessage(content=f"[DocumentWorker] {label}{part_note}: {len(findings)} finding(s).")
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# fetch_worker_node  (one-time deep-fetch-and-embed pass, no LLM call)
+# ---------------------------------------------------------------------------
+
+async def fetch_worker_node(state: AgentState) -> dict[str, Any]:
+    """Search once per sub-question and deep-embed results into the session's
+    RAG index, before any research round runs.
+
+    Deliberately makes NO LLM call -- pure deterministic tool calls plus
+    embedding work, so it never touches the LLM call/token budget. Reuses
+    the exact search tools (pubmed_search/arxiv_search/europe_pmc_search/
+    web_search) and the exact multi-chunk embedding path
+    (IngestionPipeline.ingest_pdf/ingest_url/ingest_text) already proven for
+    the uploaded-document path -- see rag/ingestion.py. Each source's
+    fetch+embed is independently try/excepted so one bad download (a dead
+    link, a malformed PDF) can't drop the others fanned out from the same
+    Send.
+    """
+    query = state.get("active_fetch_query")
+    if not query:
+        return {"messages": [AIMessage(content="[FetchPass] No query assigned; skipping.")]}
+
+    session_id = state.get("session_id", "default")
+    max_results = settings.fetch_pass_results_per_tool
+
+    import os
+    import tempfile
+    import xml.etree.ElementTree as ET
+
+    import httpx
+
+    from research_swarm.rag.indexes import get_embed_model
+    from research_swarm.rag.ingestion import IngestionPipeline
+
+    pipeline = IngestionPipeline(session_id)
+    embed_model = get_embed_model()
+    embedded = 0
+
+    # PubMed: ingest the abstract as-is -- already close to that source
+    # type's practical ceiling. Real PubMed full text needs a separate
+    # PMID -> PMCID -> PMC-efetch chain this pass doesn't build.
+    try:
+        pubmed_results = await asyncio.to_thread(
+            pubmed_search.invoke, {"query": query, "max_results": max_results}
+        )
+        for source in pubmed_results:
+            try:
+                embedded += await asyncio.to_thread(
+                    pipeline.ingest_source_dict, source, embed_model
+                )
+            except Exception as exc:
+                logger.warning("FetchPass: PubMed source ingest failed (%s) -- skipping.", exc)
+    except Exception as exc:
+        logger.warning("FetchPass: pubmed_search failed for %r (%s) -- skipping.", query[:60], exc)
+
+    # Europe PMC: overlaps with PubMed (both draw on MEDLINE) but additionally
+    # exposes open-access full text -- europe_pmc_tool.py encodes that as a
+    # "/article/PMC/{pmcid}" URL. Same two-tier pattern as arXiv below: try
+    # the deep fetch, fall back to the abstract (already carried in the
+    # Source dict) if it's not open access or the fetch fails.
+    try:
+        epmc_results = await asyncio.to_thread(
+            europe_pmc_search.invoke, {"query": query, "max_results": max_results}
+        )
+        for source in epmc_results:
+            url = source.get("url", "")
+            pmcid = url.rsplit("/", 1)[-1] if "/article/PMC/" in url else None
+            if not pmcid:
+                # Not open access (or no PMCID) -- abstract is the ceiling.
+                try:
+                    embedded += await asyncio.to_thread(
+                        pipeline.ingest_source_dict, source, embed_model
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "FetchPass: Europe PMC source ingest failed (%s) -- skipping.", exc
+                    )
+                continue
+            try:
+                resp = await asyncio.to_thread(
+                    httpx.get,
+                    f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML",
+                    timeout=20,
+                )
+                resp.raise_for_status()
+                root = ET.fromstring(resp.content)
+                body = root.find(".//body")
+                if body is None:
+                    raise ValueError("no <body> in full-text XML")
+                text = " ".join(
+                    "".join(p.itertext()).strip() for p in body.iter("p")
+                ).strip()
+                if not text:
+                    raise ValueError("full-text XML body had no paragraph text")
+                metadata = {
+                    "url": url,
+                    "title": source.get("title", ""),
+                    "source_type": "europe_pmc",
+                    "credibility_score": source.get("credibility_score", 0.9),
+                }
+                embedded += await asyncio.to_thread(
+                    pipeline.ingest_text, text, metadata, embed_model
+                )
+            except Exception as exc:
+                # Full-text fetch/parse failed -- fall back to the abstract
+                # rather than losing this source entirely, same as arXiv.
+                logger.warning(
+                    "FetchPass: Europe PMC full text failed for %r (%s) -- "
+                    "falling back to abstract.", url, exc
+                )
+                try:
+                    embedded += await asyncio.to_thread(
+                        pipeline.ingest_source_dict, source, embed_model
+                    )
+                except Exception as fallback_exc:
+                    logger.warning(
+                        "FetchPass: Europe PMC abstract fallback also failed for %r (%s) "
+                        "-- skipping.", url, fallback_exc,
+                    )
+    except Exception as exc:
+        logger.warning(
+            "FetchPass: europe_pmc_search failed for %r (%s) -- skipping.", query[:60], exc
+        )
+
+    # arXiv: download the actual PDF and embed every page via
+    # IngestionPipeline.ingest_pdf's existing multi-page chunker -- the same
+    # one already proven for uploaded PDFs -- instead of just the abstract.
+    # Falls back to the abstract if the PDF isn't fetchable (404, withdrawn,
+    # network error) so a bad download never means zero content for that paper.
+    try:
+        arxiv_results = await asyncio.to_thread(
+            arxiv_search.invoke, {"query": query, "max_results": max_results}
+        )
+        for source in arxiv_results:
+            url = source.get("url", "")
+            if not url.startswith("http"):
+                continue  # error sentinel, e.g. "arxiv://search/..."
+            pdf_url = url.replace("/abs/", "/pdf/")
+            tmp_path = None
+            try:
+                resp = await asyncio.to_thread(
+                    httpx.get, pdf_url, timeout=20, follow_redirects=True
+                )
+                resp.raise_for_status()
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    tmp.write(resp.content)
+                    tmp_path = tmp.name
+                embedded += await asyncio.to_thread(pipeline.ingest_pdf, tmp_path, embed_model)
+            except Exception as exc:
+                # PDF unavailable (404, withdrawn, network error, etc.) -- fall
+                # back to the abstract rather than losing this source entirely.
+                # Same graceful-degradation level PubMed already gets.
+                logger.warning(
+                    "FetchPass: arXiv PDF ingest failed for %r (%s) -- "
+                    "falling back to abstract.", url, exc
+                )
+                try:
+                    embedded += await asyncio.to_thread(
+                        pipeline.ingest_source_dict, source, embed_model
+                    )
+                except Exception as fallback_exc:
+                    logger.warning(
+                        "FetchPass: arXiv abstract fallback also failed for %r (%s) -- skipping.",
+                        url, fallback_exc,
+                    )
+            finally:
+                if tmp_path:
+                    os.unlink(tmp_path)
+    except Exception as exc:
+        logger.warning("FetchPass: arxiv_search failed for %r (%s) -- skipping.", query[:60], exc)
+
+    # Web: full page text (up to fetch_url's own ceiling), not just Tavily's
+    # search-engine extract. Skipped entirely when no Tavily key is
+    # configured -- calling it anyway would just embed a useless
+    # "[Search error: ...]" placeholder for every sub-question.
+    if not _tavily_configured():
+        logger.info("FetchPass: Tavily not configured -- skipping web search.")
+    else:
+        try:
+            web_results = await asyncio.to_thread(
+                web_search.invoke, {"query": query, "max_results": max_results}
+            )
+            for source in web_results:
+                url = source.get("url", "")
+                if not url:
+                    continue
+                try:
+                    embedded += await asyncio.to_thread(
+                        pipeline.ingest_url, url, embed_model, 20000
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "FetchPass: web page ingest failed for %r (%s) -- skipping.", url, exc
+                    )
+        except Exception as exc:
+            logger.warning("FetchPass: web_search failed for %r (%s) -- skipping.", query[:60], exc)
+
+    return {
+        "messages": [
+            AIMessage(content=f"[FetchPass] {embedded} chunk(s) embedded for: {query[:60]}")
         ],
     }
 

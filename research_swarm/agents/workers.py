@@ -55,9 +55,11 @@ before citing it, regardless of which tool it came from."""
 
 _STRATEGIES: dict[WorkerRole, str] = {
     WorkerRole.general: f"""\
-1. Start with retrieve_from_rag to check whether an earlier round of this
-   session already found evidence for this (uploaded documents are already
-   reflected in the existing findings, not in this tool -- see below).
+1. Start with retrieve_from_rag -- a fetch pass already searched and embedded
+   sources for this session's sub-questions before this round began, so this
+   often already has strong evidence without a live search (uploaded
+   documents are already reflected in the existing findings, not in this
+   tool -- see below).
 2. Use web_search for fresh information; add arxiv_search or pubmed_search
    for the topic's domain (see below).
 3. Fetch 1-2 promising URLs for detail.
@@ -69,7 +71,11 @@ _STRATEGIES: dict[WorkerRole, str] = {
 You are the ACADEMIC worker. Prioritise peer-reviewed and pre-print sources.
 1. For medical/clinical/biological questions, use pubmed_search FIRST.
    For CS/physics/math/engineering questions, use arxiv_search FIRST.
-2. Check retrieve_from_rag for evidence an earlier round already found (NOT
+   If pubmed_search only gets you an abstract and you need more detail,
+   try europe_pmc_search -- it overlaps with PubMed's own coverage but
+   additionally surfaces open-access full text for a subset of results.
+2. Check retrieve_from_rag first -- a fetch pass already searched and
+   deep-embedded papers for this session before this round began (NOT
    uploaded papers -- those are already reflected in the existing findings).
 3. Use web_search only for supplementary context or DOI resolution.
 4. Cite specific paper titles, authors, or DOIs/PMIDs wherever possible.
@@ -117,8 +123,11 @@ Available tools:
   web_search        -- search the web (Tavily)
   arxiv_search      -- search arXiv preprints (physics/CS/math -- NOT biomedical)
   pubmed_search     -- search PubMed (biomedical/clinical/life-sciences literature)
+  europe_pmc_search -- overlaps with pubmed_search but also surfaces open-access
+                       full text, not just an abstract, for a subset of results
   fetch_url         -- fetch and extract text from a URL
-  retrieve_from_rag -- query evidence found by earlier rounds of THIS session
+  retrieve_from_rag -- query evidence already embedded for THIS session, both
+                       from a pre-research fetch pass and from earlier rounds
                        (NOT user-uploaded documents -- those are already in
                        the existing findings, extracted before research began)
 

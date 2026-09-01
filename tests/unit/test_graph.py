@@ -463,33 +463,21 @@ class TestDispatchNode:
 # ---------------------------------------------------------------------------
 
 class TestRouteFromDocumentPass:
-    def test_no_documents_bounces_straight_to_dispatch(self):
+    """"Has docs" and "has plan" are independent gates -- only a missing plan
+    bounces straight to dispatch_node. A plan with no documents still gets
+    the fetch pass (one Send("fetch_worker_node", ...) per sub-question)."""
+
+    def test_no_documents_emits_fetch_sends_only(self):
         from research_swarm.graph.nodes import route_from_document_pass
 
         plan = _make_plan(2)
         state = _make_state(plan=plan, ingested_documents=[])
         sends = route_from_document_pass(state)
 
-        assert len(sends) == 1
-        assert sends[0].node == "dispatch_node"
-
-    def test_no_documents_bounce_carries_state(self):
-        """Send() gives dispatch_node ONLY the payload -- it must carry
-        everything _research_targets/dispatch_node reads, same as the
-        analogous _collect_bounce_payload case in route_from_dispatch."""
-        from research_swarm.graph.nodes import route_from_document_pass
-
-        plan = _make_plan(2)
-        f = _make_finding(plan.sub_questions[0])
-        state = _make_state(
-            plan=plan, findings=[f], research_rounds=0, ingested_documents=[],
-        )
-        sends = route_from_document_pass(state)
-
-        payload = sends[0].arg
-        assert payload["plan"] == plan
-        assert payload["findings"] == [f]
-        assert payload["research_rounds"] == 0
+        assert len(sends) == 2
+        assert all(s.node == "fetch_worker_node" for s in sends)
+        queries = {s.arg["active_fetch_query"] for s in sends}
+        assert queries == set(plan.sub_questions)
 
     def test_no_plan_bounces_straight_to_dispatch(self):
         from research_swarm.graph.nodes import route_from_document_pass
@@ -499,6 +487,23 @@ class TestRouteFromDocumentPass:
 
         assert len(sends) == 1
         assert sends[0].node == "dispatch_node"
+
+    def test_no_plan_bounce_carries_state(self):
+        """Send() gives dispatch_node ONLY the payload -- it must carry
+        everything _research_targets/dispatch_node reads, same as the
+        analogous _collect_bounce_payload case in route_from_dispatch."""
+        from research_swarm.graph.nodes import route_from_document_pass
+
+        f = _make_finding("q1")
+        state = _make_state(
+            plan=None, findings=[f], research_rounds=0, ingested_documents=[],
+        )
+        sends = route_from_document_pass(state)
+
+        payload = sends[0].arg
+        assert payload["plan"] is None
+        assert payload["findings"] == [f]
+        assert payload["research_rounds"] == 0
 
     def test_one_send_per_document_when_under_size_threshold(self):
         from research_swarm.graph.nodes import route_from_document_pass
@@ -511,11 +516,13 @@ class TestRouteFromDocumentPass:
         state = _make_state(plan=plan, ingested_documents=docs)
         sends = route_from_document_pass(state)
 
-        assert len(sends) == 2
-        assert all(s.node == "document_worker_node" for s in sends)
-        urls = {s.arg["active_document"]["url"] for s in sends}
+        doc_sends = [s for s in sends if s.node == "document_worker_node"]
+        fetch_sends = [s for s in sends if s.node == "fetch_worker_node"]
+        assert len(doc_sends) == 2
+        assert len(fetch_sends) == 2  # one per sub-question, independent of docs
+        urls = {s.arg["active_document"]["url"] for s in doc_sends}
         assert urls == {"https://a.com", "https://b.com"}
-        for s in sends:
+        for s in doc_sends:
             assert s.arg["sub_questions_snapshot"] == list(plan.sub_questions)
             assert s.arg["active_doc_part_total"] == 1
 
@@ -528,12 +535,51 @@ class TestRouteFromDocumentPass:
         state = _make_state(plan=plan, ingested_documents=docs)
         sends = route_from_document_pass(state)
 
-        assert len(sends) >= 2
+        doc_sends = [s for s in sends if s.node == "document_worker_node"]
+        fetch_sends = [s for s in sends if s.node == "fetch_worker_node"]
+        assert len(doc_sends) >= 2
+        assert len(fetch_sends) == 1  # one sub-question in this plan
+        assert all(s.arg["active_document"]["url"] == "https://big.com" for s in doc_sends)
+        assert all(s.arg["active_doc_part_total"] == len(doc_sends) for s in doc_sends)
+        part_indices = sorted(s.arg["active_doc_part_index"] for s in doc_sends)
+        assert part_indices == list(range(len(doc_sends)))
+
+    def test_fetch_pass_disabled_skips_fetch_sends(self):
+        from research_swarm.config import settings
+        from research_swarm.graph.nodes import route_from_document_pass
+
+        plan = _make_plan(2)
+        docs = [{"url": "https://a.com", "title": "A", "text": "short text a", "source_type": "web"}]
+        state = _make_state(plan=plan, ingested_documents=docs)
+
+        original = settings.enable_fetch_pass
+        try:
+            settings.enable_fetch_pass = False
+            sends = route_from_document_pass(state)
+        finally:
+            settings.enable_fetch_pass = original
+
         assert all(s.node == "document_worker_node" for s in sends)
-        assert all(s.arg["active_document"]["url"] == "https://big.com" for s in sends)
-        assert all(s.arg["active_doc_part_total"] == len(sends) for s in sends)
-        part_indices = sorted(s.arg["active_doc_part_index"] for s in sends)
-        assert part_indices == list(range(len(sends)))
+        assert len(sends) == 1
+
+    def test_fetch_pass_disabled_and_no_docs_bounces(self):
+        """Both gates empty (no docs, fetch pass off) -- must not return an
+        empty Send list, which falls through to the dispatch_node bounce."""
+        from research_swarm.config import settings
+        from research_swarm.graph.nodes import route_from_document_pass
+
+        plan = _make_plan(2)
+        state = _make_state(plan=plan, ingested_documents=[])
+
+        original = settings.enable_fetch_pass
+        try:
+            settings.enable_fetch_pass = False
+            sends = route_from_document_pass(state)
+        finally:
+            settings.enable_fetch_pass = original
+
+        assert len(sends) == 1
+        assert sends[0].node == "dispatch_node"
 
 
 class TestDocumentPassNode:
@@ -581,6 +627,359 @@ class TestDocumentWorkerNode:
 
         result = await document_worker_node(_make_state(active_document=None))
         assert result.get("findings") is None
+
+
+class TestGetResearcherTools:
+    """web_search has no session-scoped BYOK path (unlike anthropic/openai/
+    ollama) -- it's server-funded or unavailable. A deployment that doesn't
+    fund it (e.g. the Hugging Face Space) must not hand workers a tool that
+    will only ever return a useless error placeholder."""
+
+    def test_excludes_web_search_when_tavily_not_configured(self):
+        from research_swarm.graph.nodes import _get_researcher_tools, web_search
+
+        with patch("research_swarm.graph.nodes._tavily_configured", return_value=False):
+            tools = _get_researcher_tools()
+
+        assert web_search not in tools
+
+    def test_includes_web_search_when_tavily_configured(self):
+        from research_swarm.graph.nodes import _get_researcher_tools, web_search
+
+        with patch("research_swarm.graph.nodes._tavily_configured", return_value=True):
+            tools = _get_researcher_tools()
+
+        assert web_search in tools
+
+    def test_includes_europe_pmc_search_unconditionally(self):
+        """Unlike web_search, europe_pmc_search needs no key -- it should
+        always be available to workers regardless of Tavily configuration."""
+        from research_swarm.graph.nodes import _get_researcher_tools, europe_pmc_search
+
+        with patch("research_swarm.graph.nodes._tavily_configured", return_value=False):
+            tools = _get_researcher_tools()
+
+        assert europe_pmc_search in tools
+
+
+class TestFetchWorkerNode:
+    """fetch_worker_node makes NO LLM call -- pure deterministic search +
+    deep-embed. Each source's fetch+embed is independently try/excepted so
+    one bad download can't drop the others fanned out from the same Send."""
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_query_assigned(self):
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web:
+            result = await fetch_worker_node(_make_state(active_fetch_query=None))
+
+        mock_pubmed.invoke.assert_not_called()
+        mock_arxiv.invoke.assert_not_called()
+        mock_epmc.invoke.assert_not_called()
+        mock_web.invoke.assert_not_called()
+        assert "No query assigned" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_embeds_pubmed_arxiv_and_web_results(self):
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        pubmed_hit = {"url": "https://pubmed.ncbi.nlm.nih.gov/1", "title": "P", "snippet": "abstract text"}
+        arxiv_hit = {"url": "https://arxiv.org/abs/1234.5678", "title": "A", "snippet": "abs"}
+        web_hit = {"url": "https://example.com/article", "title": "W", "snippet": "extract"}
+
+        mock_pipeline = MagicMock()
+        mock_pipeline.ingest_source_dict.return_value = 1
+        mock_pipeline.ingest_pdf.return_value = 5
+        mock_pipeline.ingest_url.return_value = 3
+
+        mock_pdf_response = MagicMock()
+        mock_pdf_response.content = b"%PDF-1.4 fake pdf bytes"
+        mock_pdf_response.raise_for_status = MagicMock()
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("research_swarm.graph.nodes._tavily_configured", return_value=True), \
+             patch("httpx.get", return_value=mock_pdf_response), \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.return_value = [pubmed_hit]
+            mock_arxiv.invoke.return_value = [arxiv_hit]
+            mock_epmc.invoke.return_value = []
+            mock_web.invoke.return_value = [web_hit]
+
+            state = _make_state(active_fetch_query="Sub-question 1")
+            result = await fetch_worker_node(state)
+
+        mock_pipeline.ingest_source_dict.assert_called_once_with(pubmed_hit, mock_pipeline.ingest_source_dict.call_args.args[1])
+        mock_pipeline.ingest_pdf.assert_called_once()
+        assert mock_pipeline.ingest_pdf.call_args.args[0].endswith(".pdf")
+        mock_pipeline.ingest_url.assert_called_once_with(
+            "https://example.com/article", mock_pipeline.ingest_url.call_args.args[1], 20000,
+        )
+        assert "9" in result["messages"][0].content  # 1 + 5 + 3 chunks
+
+    @pytest.mark.asyncio
+    async def test_one_tool_failure_does_not_abort_others(self):
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        web_hit = {"url": "https://example.com/article", "title": "W", "snippet": "extract"}
+        mock_pipeline = MagicMock()
+        mock_pipeline.ingest_url.return_value = 2
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("research_swarm.graph.nodes._tavily_configured", return_value=True), \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.side_effect = Exception("NCBI down")
+            mock_arxiv.invoke.side_effect = Exception("arXiv down")
+            mock_epmc.invoke.side_effect = Exception("Europe PMC down")
+            mock_web.invoke.return_value = [web_hit]
+
+            result = await fetch_worker_node(_make_state(active_fetch_query="q"))
+
+        mock_pipeline.ingest_url.assert_called_once()
+        assert "2" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_web_search_skipped_entirely_when_tavily_not_configured(self):
+        """No Tavily key (e.g. the Hugging Face Space, which doesn't fund it)
+        -- must skip web_search entirely rather than call it and embed a
+        useless '[Search error: ...]' placeholder."""
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        mock_pipeline = MagicMock()
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("research_swarm.graph.nodes._tavily_configured", return_value=False), \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.return_value = []
+            mock_arxiv.invoke.return_value = []
+            mock_epmc.invoke.return_value = []
+
+            result = await fetch_worker_node(_make_state(active_fetch_query="q"))
+
+        mock_web.invoke.assert_not_called()
+        mock_pipeline.ingest_url.assert_not_called()
+        assert "0" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_arxiv_error_sentinel_is_skipped(self):
+        """arxiv_search's own error path returns a non-http:// sentinel URL
+        (e.g. "arxiv://search/...") instead of raising -- must not be treated
+        as a real paper to download."""
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        sentinel = {"url": "arxiv://search/q", "title": "arXiv search unavailable", "snippet": "[Search error: X]"}
+        mock_pipeline = MagicMock()
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("httpx.get") as mock_get, \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.return_value = []
+            mock_arxiv.invoke.return_value = [sentinel]
+            mock_epmc.invoke.return_value = []
+            mock_web.invoke.return_value = []
+
+            result = await fetch_worker_node(_make_state(active_fetch_query="q"))
+
+        mock_get.assert_not_called()
+        mock_pipeline.ingest_pdf.assert_not_called()
+        assert "0" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_arxiv_pdf_download_failure_falls_back_to_abstract(self):
+        """A 404/withdrawn/network-error PDF must not mean zero content for
+        that paper -- fall back to embedding the abstract, same as PubMed."""
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        arxiv_hit = {"url": "https://arxiv.org/abs/1234.5678", "title": "A", "snippet": "abs"}
+        mock_pipeline = MagicMock()
+        mock_pipeline.ingest_source_dict.return_value = 1
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("httpx.get", side_effect=Exception("network down")), \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.return_value = []
+            mock_arxiv.invoke.return_value = [arxiv_hit]
+            mock_epmc.invoke.return_value = []
+            mock_web.invoke.return_value = []
+
+            result = await fetch_worker_node(_make_state(active_fetch_query="q"))
+
+        mock_pipeline.ingest_pdf.assert_not_called()
+        mock_pipeline.ingest_source_dict.assert_called_once_with(
+            arxiv_hit, mock_pipeline.ingest_source_dict.call_args.args[1],
+        )
+        assert "1" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_arxiv_abstract_fallback_failure_is_also_tolerated(self):
+        """If even the abstract fallback fails, the node must still return
+        cleanly rather than propagating the exception."""
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        arxiv_hit = {"url": "https://arxiv.org/abs/1234.5678", "title": "A", "snippet": "abs"}
+        mock_pipeline = MagicMock()
+        mock_pipeline.ingest_source_dict.side_effect = Exception("embedding model unavailable")
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("httpx.get", side_effect=Exception("network down")), \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.return_value = []
+            mock_arxiv.invoke.return_value = [arxiv_hit]
+            mock_epmc.invoke.return_value = []
+            mock_web.invoke.return_value = []
+
+            result = await fetch_worker_node(_make_state(active_fetch_query="q"))
+
+        assert "0" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_europe_pmc_open_access_hit_embeds_full_text(self):
+        """An open-access PMC hit must fetch and embed the real full-text
+        XML via ingest_text, not just the abstract."""
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        epmc_hit = {
+            "url": "https://europepmc.org/article/PMC/PMC13210284",
+            "title": "Intermittent Fasting Review",
+            "snippet": "abstract text",
+            "credibility_score": 0.9,
+        }
+        mock_pipeline = MagicMock()
+        mock_pipeline.ingest_text.return_value = 12
+
+        mock_xml_response = MagicMock()
+        mock_xml_response.raise_for_status = MagicMock()
+        mock_xml_response.content = (
+            b"<article><body><p>Fasting improves metrics.</p>"
+            b"<p>Further detail here.</p></body></article>"
+        )
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("httpx.get", return_value=mock_xml_response), \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.return_value = []
+            mock_arxiv.invoke.return_value = []
+            mock_epmc.invoke.return_value = [epmc_hit]
+            mock_web.invoke.return_value = []
+
+            result = await fetch_worker_node(_make_state(active_fetch_query="q"))
+
+        mock_pipeline.ingest_text.assert_called_once()
+        text_arg = mock_pipeline.ingest_text.call_args.args[0]
+        assert "Fasting improves metrics" in text_arg
+        assert "Further detail here" in text_arg
+        mock_pipeline.ingest_source_dict.assert_not_called()
+        assert "12" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_europe_pmc_full_text_failure_falls_back_to_abstract(self):
+        """A PMC hit whose full-text fetch fails (network error, malformed
+        XML, empty body) must still contribute its abstract, not nothing."""
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        epmc_hit = {
+            "url": "https://europepmc.org/article/PMC/PMC13210284",
+            "title": "Intermittent Fasting Review",
+            "snippet": "abstract text",
+            "credibility_score": 0.9,
+        }
+        mock_pipeline = MagicMock()
+        mock_pipeline.ingest_source_dict.return_value = 1
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("httpx.get", side_effect=Exception("network down")), \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.return_value = []
+            mock_arxiv.invoke.return_value = []
+            mock_epmc.invoke.return_value = [epmc_hit]
+            mock_web.invoke.return_value = []
+
+            result = await fetch_worker_node(_make_state(active_fetch_query="q"))
+
+        mock_pipeline.ingest_text.assert_not_called()
+        mock_pipeline.ingest_source_dict.assert_called_once_with(
+            epmc_hit, mock_pipeline.ingest_source_dict.call_args.args[1],
+        )
+        assert "1" in result["messages"][0].content
+
+    @pytest.mark.asyncio
+    async def test_europe_pmc_non_open_access_skips_full_text_attempt(self):
+        """A non-OA (or no-PMCID) result must go straight to the abstract --
+        no full-text HTTP call should even be attempted."""
+        from research_swarm.graph.nodes import fetch_worker_node
+
+        epmc_hit = {
+            "url": "https://europepmc.org/article/MED/99",
+            "title": "Non-OA Paper",
+            "snippet": "abstract text",
+            "credibility_score": 0.9,
+        }
+        mock_pipeline = MagicMock()
+        mock_pipeline.ingest_source_dict.return_value = 1
+
+        with patch("research_swarm.graph.nodes.pubmed_search") as mock_pubmed, \
+             patch("research_swarm.graph.nodes.arxiv_search") as mock_arxiv, \
+             patch("research_swarm.graph.nodes.europe_pmc_search") as mock_epmc, \
+             patch("research_swarm.graph.nodes.web_search") as mock_web, \
+             patch("httpx.get") as mock_get, \
+             patch(
+                 "research_swarm.rag.ingestion.IngestionPipeline", return_value=mock_pipeline,
+             ), patch("research_swarm.rag.indexes.get_embed_model", return_value=MagicMock()):
+            mock_pubmed.invoke.return_value = []
+            mock_arxiv.invoke.return_value = []
+            mock_epmc.invoke.return_value = [epmc_hit]
+            mock_web.invoke.return_value = []
+
+            result = await fetch_worker_node(_make_state(active_fetch_query="q"))
+
+        mock_get.assert_not_called()
+        mock_pipeline.ingest_source_dict.assert_called_once_with(
+            epmc_hit, mock_pipeline.ingest_source_dict.call_args.args[1],
+        )
+        assert "1" in result["messages"][0].content
 
 
 # ---------------------------------------------------------------------------
@@ -996,7 +1395,8 @@ class TestGraphBuilder:
         g = build_graph(interrupt_before_writer=False)
         nodes = set(g.nodes.keys())
         for required in ("supervisor", "dispatch_node", "worker_node", "collect_node",
-                         "critic", "fact_checker", "writer"):
+                         "critic", "fact_checker", "writer",
+                         "document_pass_node", "document_worker_node", "fetch_worker_node"):
             assert required in nodes, f"Missing node: {required}"
 
     def test_get_thread_config_format(self):
@@ -1300,8 +1700,12 @@ class TestResearchPipelinePhase4:
             return {"final_report": report, "draft_report": report,
                     "writer_instructions": None, "messages": []}
 
+        async def fake_fetch_worker_node(state):
+            return {"messages": []}
+
         with patch.object(_nodes, "supervisor_node",    fake_supervisor_node), \
              patch.object(_nodes, "worker_node",        fake_worker_node), \
+             patch.object(_nodes, "fetch_worker_node",  fake_fetch_worker_node), \
              patch.object(_nodes, "collect_node",       fake_collect_node), \
              patch.object(_nodes, "critic_node",        fake_critic_node), \
              patch.object(_nodes, "fact_checker_node",  fake_fact_checker_node), \
@@ -1379,10 +1783,14 @@ class TestStandardDepthTerminates:
         async def fake_run_writer(state, llm):
             return report
 
+        async def fake_fetch_worker_node(state):
+            return {"messages": []}
+
         from research_swarm.config import settings
 
         with _patch.object(_nodes, "run_supervisor", fake_run_supervisor), \
              _patch.object(_nodes, "run_worker", fake_run_worker), \
+             _patch.object(_nodes, "fetch_worker_node", fake_fetch_worker_node), \
              _patch.object(_nodes, "run_critic", fake_run_critic), \
              _patch.object(_nodes, "run_fact_checker", fake_run_fact_checker), \
              _patch.object(_nodes, "run_writer", fake_run_writer), \
@@ -1438,8 +1846,12 @@ class TestHITLInterruptResume:
         async def fake_writer(state):  # pragma: no cover
             raise AssertionError("Writer must not fire before HITL approval")
 
+        async def fake_fetch_worker_node(state):
+            return {"messages": []}
+
         with patch.object(_nodes, "supervisor_node",    fake_supervisor), \
              patch.object(_nodes, "worker_node",        fake_worker), \
+             patch.object(_nodes, "fetch_worker_node",  fake_fetch_worker_node), \
              patch.object(_nodes, "collect_node",       fake_collect), \
              patch.object(_nodes, "critic_node",        fake_critic), \
              patch.object(_nodes, "fact_checker_node",  fake_fc), \
@@ -1489,8 +1901,12 @@ class TestHITLInterruptResume:
             return {"final_report": report, "draft_report": report,
                     "writer_instructions": None, "messages": []}
 
+        async def fake_fetch_worker_node(state):
+            return {"messages": []}
+
         with patch.object(_nodes, "supervisor_node",    fake_supervisor), \
              patch.object(_nodes, "worker_node",        fake_worker), \
+             patch.object(_nodes, "fetch_worker_node",  fake_fetch_worker_node), \
              patch.object(_nodes, "collect_node",       fake_collect), \
              patch.object(_nodes, "critic_node",        fake_critic), \
              patch.object(_nodes, "fact_checker_node",  fake_fc), \

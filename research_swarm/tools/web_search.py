@@ -26,6 +26,20 @@ def _get_tavily_client() -> TavilyClient:
     return _tavily_client
 
 
+def is_configured() -> bool:
+    """Whether a Tavily key is actually set.
+
+    Unlike anthropic/openai/ollama, there's no session-scoped BYOK path for
+    Tavily (SessionCredentials has no tavily_api_key field) -- it's
+    server-funded or not available at all. Deployments that don't fund it
+    (e.g. the Hugging Face Space) should skip web_search entirely rather
+    than call it and get back a useless "[Search error: ...]" placeholder
+    source for every query. Callers: _get_researcher_tools/fetch_worker_node
+    in graph/nodes.py.
+    """
+    return bool(settings.tavily_api_key.get_secret_value())
+
+
 class WebSearchInput(BaseModel):
     query: str = Field(..., description="Search query string")
     max_results: int = Field(default=5, ge=1, le=20, description="Number of results")

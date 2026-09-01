@@ -122,6 +122,9 @@ async def test_shallow_research_flow():
             "writer_instructions": None, "messages": [],
         }
 
+    async def fake_fetch_worker_node(state):
+        return {"messages": []}
+
     checkpointer = MemorySaver(serde=_serde)
     budget = get_budget(session_id, limit=25)
     calls_before = budget.used
@@ -129,6 +132,7 @@ async def test_shallow_research_flow():
     with (
         patch.object(_nodes, "supervisor_node",    fake_supervisor),
         patch.object(_nodes, "worker_node",        fake_worker),
+        patch.object(_nodes, "fetch_worker_node",  fake_fetch_worker_node),
         patch.object(_nodes, "collect_node",       fake_collect),
         patch.object(_nodes, "critic_node",        fake_critic),
         patch.object(_nodes, "fact_checker_node",  fake_fc),

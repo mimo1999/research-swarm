@@ -140,6 +140,18 @@ class TestWebSearch:
         assert result[0]["credibility_score"] == 0.0
         assert "Search error" in result[0]["snippet"]
 
+    def test_is_configured_reflects_settings_key(self, monkeypatch):
+        from pydantic import SecretStr
+
+        from research_swarm.config import settings
+        from research_swarm.tools.web_search import is_configured
+
+        monkeypatch.setattr(settings, "tavily_api_key", SecretStr(""))
+        assert is_configured() is False
+
+        monkeypatch.setattr(settings, "tavily_api_key", SecretStr("tvly-real-key"))
+        assert is_configured() is True
+
 
 # ── arxiv_search ──────────────────────────────────────────────────────────────
 
@@ -339,6 +351,111 @@ class TestPubmedSearch:
             assert call_kwargs["params"]["api_key"] == "test-key-123"
         finally:
             settings.ncbi_api_key = original
+
+
+# ── europe_pmc_search ────────────────────────────────────────────────────────
+
+def _mock_epmc_response(results: list[dict]) -> MagicMock:
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {"resultList": {"result": results}}
+    return resp
+
+
+def _epmc_result(**overrides) -> dict:
+    base = {
+        "id": "42197043",
+        "source": "MED",
+        "pmid": "42197043",
+        "pmcid": "PMC13210284",
+        "doi": "10.3390/nu18101583",
+        "title": "Intermittent Fasting: Health Impacts and Therapeutic Potential.",
+        "journalInfo": {"journal": {"title": "Nutrients"}},
+        "pubYear": "2026",
+        "isOpenAccess": "Y",
+        "abstractText": "<h4>Background</h4>Intermittent fasting has emerged as a strategy.",
+    }
+    base.update(overrides)
+    return base
+
+
+class TestEuropePmcSearch:
+    @patch("research_swarm.tools.europe_pmc_tool.httpx.get")
+    def test_returns_list_of_source_dicts(self, mock_get):
+        mock_get.return_value = _mock_epmc_response([_epmc_result()])
+
+        from research_swarm.tools.europe_pmc_tool import europe_pmc_search
+        result = europe_pmc_search.invoke({"query": "intermittent fasting", "max_results": 1})
+
+        assert len(result) == 1
+        src = result[0]
+        assert src["source_type"] == SourceType.europe_pmc.value
+        assert "Intermittent Fasting" in src["title"]
+        assert src["credibility_score"] == 0.9
+
+    def test_html_tags_stripped_from_abstract(self):
+        with patch("research_swarm.tools.europe_pmc_tool.httpx.get") as mock_get:
+            mock_get.return_value = _mock_epmc_response([_epmc_result()])
+            from research_swarm.tools.europe_pmc_tool import europe_pmc_search
+            result = europe_pmc_search.invoke({"query": "test"})
+
+        snippet = result[0]["snippet"]
+        assert "<h4>" not in snippet
+        assert "Background" in snippet
+        assert "Intermittent fasting has emerged" in snippet
+
+    def test_open_access_result_gets_pmc_url(self):
+        with patch("research_swarm.tools.europe_pmc_tool.httpx.get") as mock_get:
+            mock_get.return_value = _mock_epmc_response(
+                [_epmc_result(isOpenAccess="Y", pmcid="PMC13210284")]
+            )
+            from research_swarm.tools.europe_pmc_tool import europe_pmc_search
+            result = europe_pmc_search.invoke({"query": "test"})
+
+        assert result[0]["url"] == "https://europepmc.org/article/PMC/PMC13210284"
+
+    def test_non_open_access_result_gets_generic_article_url(self):
+        with patch("research_swarm.tools.europe_pmc_tool.httpx.get") as mock_get:
+            mock_get.return_value = _mock_epmc_response(
+                [_epmc_result(isOpenAccess="N", pmcid=None, source="MED", id="99")]
+            )
+            from research_swarm.tools.europe_pmc_tool import europe_pmc_search
+            result = europe_pmc_search.invoke({"query": "test"})
+
+        url = result[0]["url"]
+        assert "/article/PMC/" not in url
+        assert url == "https://europepmc.org/article/MED/99"
+
+    def test_empty_results_returns_no_results_placeholder(self):
+        with patch("research_swarm.tools.europe_pmc_tool.httpx.get") as mock_get:
+            mock_get.return_value = _mock_epmc_response([])
+            from research_swarm.tools.europe_pmc_tool import europe_pmc_search
+            result = europe_pmc_search.invoke({"query": "an extremely obscure query"})
+
+        assert len(result) == 1
+        assert result[0]["source_type"] == SourceType.europe_pmc.value
+        assert result[0]["credibility_score"] == 0.0
+
+    def test_network_error_returns_error_placeholder(self):
+        with patch("research_swarm.tools.europe_pmc_tool.httpx.get") as mock_get:
+            mock_get.side_effect = Exception("connection reset")
+            from research_swarm.tools.europe_pmc_tool import europe_pmc_search
+            result = europe_pmc_search.invoke({"query": "test"})
+
+        assert len(result) == 1
+        assert result[0]["credibility_score"] == 0.0
+        assert "Search error" in result[0]["snippet"]
+
+    def test_results_without_abstract_are_skipped(self):
+        with patch("research_swarm.tools.europe_pmc_tool.httpx.get") as mock_get:
+            mock_get.return_value = _mock_epmc_response([_epmc_result(abstractText="")])
+            from research_swarm.tools.europe_pmc_tool import europe_pmc_search
+            result = europe_pmc_search.invoke({"query": "test"})
+
+        # No usable abstract -- falls through to the "no results" placeholder,
+        # not a Source built from an empty snippet.
+        assert len(result) == 1
+        assert result[0]["credibility_score"] == 0.0
 
 
 # ── url_fetcher ───────────────────────────────────────────────────────────────

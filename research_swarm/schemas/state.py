@@ -1,7 +1,7 @@
-from typing import Annotated, Literal, NotRequired
+from typing import Annotated, Literal
 
 from langgraph.graph.message import add_messages
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from .critique import Critique
 from .finding import Finding
@@ -136,3 +136,9 @@ class AgentState(TypedDict):
     active_doc_part_index:  NotRequired[int]
     active_doc_part_total:  NotRequired[int]
     sub_questions_snapshot: NotRequired[list[str]]
+
+    # Per-fetch-worker state injected via Send; cleared after that worker's
+    # single call. Mirrors active_document above, but for the one-time
+    # deep-fetch-and-embed pass (route_from_document_pass -> fetch_worker_node)
+    # instead of the uploaded-document extraction pass.
+    active_fetch_query: NotRequired[str | None]
