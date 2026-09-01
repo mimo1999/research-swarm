@@ -421,6 +421,90 @@ class TestDeleteSession:
 
 
 # ---------------------------------------------------------------------------
+# persistence.sessions.prune_expired_sessions()
+# ---------------------------------------------------------------------------
+
+class TestPruneExpiredSessions:
+    """prune_expired_sessions() backs space_mode's startup cleanup pass."""
+
+    def _patch_db(self, monkeypatch, tmp_path):
+        from research_swarm.config import settings
+        monkeypatch.setattr(settings, "data_dir", tmp_path)
+
+    def test_returns_zero_when_no_sessions(self, tmp_path, monkeypatch):
+        self._patch_db(monkeypatch, tmp_path)
+        from research_swarm.persistence.sessions import prune_expired_sessions
+        assert prune_expired_sessions(retention_seconds=3600, max_sessions=40) == 0
+
+    def test_deletes_sessions_older_than_retention(self, tmp_path, monkeypatch):
+        self._patch_db(monkeypatch, tmp_path)
+        db = tmp_path / "checkpoints" / "sessions.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        # created_at is parsed as UTC; "old" is far enough in the past that
+        # any retention window this test uses (seconds) has long expired.
+        _seed_checkpoints(db, [
+            {"thread_id": "ancient", "checkpoint_id": "c1", "created_at": "2000-01-01T00:00:00"},
+        ])
+        from research_swarm.persistence.sessions import list_sessions, prune_expired_sessions
+        deleted = prune_expired_sessions(retention_seconds=60, max_sessions=40)
+        assert deleted == 1
+        assert list_sessions() == []
+
+    def test_keeps_sessions_within_retention_and_under_cap(self, tmp_path, monkeypatch):
+        self._patch_db(monkeypatch, tmp_path)
+        db = tmp_path / "checkpoints" / "sessions.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import UTC, datetime, timedelta
+        recent = (datetime.now(UTC) - timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%S")
+        _seed_checkpoints(db, [{"thread_id": "fresh", "checkpoint_id": "c1", "created_at": recent}])
+        from research_swarm.persistence.sessions import list_sessions, prune_expired_sessions
+        deleted = prune_expired_sessions(retention_seconds=3600, max_sessions=40)
+        assert deleted == 0
+        assert len(list_sessions()) == 1
+
+    def test_prunes_oldest_beyond_max_sessions_even_within_retention(self, tmp_path, monkeypatch):
+        self._patch_db(monkeypatch, tmp_path)
+        db = tmp_path / "checkpoints" / "sessions.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        from datetime import UTC, datetime, timedelta
+        now = datetime.now(UTC)
+        # Three sessions, all within the retention window, but max_sessions=2 --
+        # the oldest of the three must go even though none has expired.
+        _seed_checkpoints(db, [
+            {
+                "thread_id": f"sess-{i}",
+                "checkpoint_id": "c1",
+                "created_at": (now - timedelta(seconds=i)).strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            for i in range(3)
+        ])
+        from research_swarm.persistence.sessions import list_sessions, prune_expired_sessions
+        deleted = prune_expired_sessions(retention_seconds=3600, max_sessions=2)
+        assert deleted == 1
+        remaining = {s.thread_id for s in list_sessions()}
+        assert remaining == {"sess-0", "sess-1"}   # sess-2 is the oldest of the three
+
+    def test_null_updated_at_is_treated_as_expired(self, tmp_path, monkeypatch):
+        """A session with no parseable timestamp is pruned rather than kept forever."""
+        self._patch_db(monkeypatch, tmp_path)
+        db = tmp_path / "checkpoints" / "sessions.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db))
+        conn.execute(_CHECKPOINTS_DDL)
+        conn.execute(
+            "INSERT INTO checkpoints (thread_id, checkpoint_ns, checkpoint_id, created_at) "
+            "VALUES (?, '', ?, NULL)",
+            ("no-timestamp", "c1"),
+        )
+        conn.commit()
+        conn.close()
+        from research_swarm.persistence.sessions import list_sessions, prune_expired_sessions
+        deleted = prune_expired_sessions(retention_seconds=3600, max_sessions=40)
+        assert deleted == 1
+        assert list_sessions() == []
+
+
+# ---------------------------------------------------------------------------
 # persistence.sessions.get_session_state()
 # ---------------------------------------------------------------------------
 

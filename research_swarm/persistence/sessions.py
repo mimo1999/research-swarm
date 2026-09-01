@@ -5,7 +5,7 @@ import asyncio
 import shutil
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +66,7 @@ def list_sessions() -> list[SessionSummary]:
             return None
         for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
             try:
-                return datetime.strptime(raw, fmt).replace(tzinfo=UTC)
+                return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
         return None
@@ -176,3 +176,39 @@ def delete_session(thread_id: str) -> int:
             )
 
     return rows_deleted
+
+
+def prune_expired_sessions(retention_seconds: int, max_sessions: int) -> int:
+    """Delete sessions older than *retention_seconds* or beyond *max_sessions*.
+
+    Intended for hosted/multi-tenant deployments (settings.space_mode) where
+    no one is around to click "delete session" and the underlying storage is
+    typically ephemeral anyway -- see the space_* fields on Settings. Deletes:
+      - every session last touched more than retention_seconds ago, then
+      - the oldest remaining sessions past max_sessions, if still over the cap.
+
+    Sessions with no parseable updated_at timestamp are treated as expired
+    (deleted) rather than kept indefinitely, since a corrupt/unreadable
+    timestamp is more likely stale data than a session still in use.
+
+    Returns the number of sessions deleted.
+    """
+    now = datetime.now(timezone.utc)
+    sessions = list_sessions()  # already ordered newest-first (last_seen DESC)
+
+    deleted = 0
+    kept: list[SessionSummary] = []
+    for s in sessions:
+        age = (now - s.updated_at).total_seconds() if s.updated_at else None
+        if age is None or age > retention_seconds:
+            delete_session(s.thread_id)
+            deleted += 1
+        else:
+            kept.append(s)
+
+    # kept is still newest-first; anything past max_sessions is the oldest excess.
+    for s in kept[max_sessions:]:
+        delete_session(s.thread_id)
+        deleted += 1
+
+    return deleted
