@@ -150,6 +150,34 @@ class TestGetAgentLlm:
         mock_ollama_cls.assert_called_once()
         assert mock_ollama_cls.call_args.kwargs["model"] == "llama3.2"
 
+    def test_ollama_reasoning_disabled_passes_none_not_false(self, monkeypatch):
+        """settings.ollama_reasoning=False must map to reasoning=None, not
+        False -- passing False outright would force reasoning off for models
+        that reason by default, not just leave their own default alone."""
+        from research_swarm.agents.base import get_agent_llm
+        from research_swarm.config import settings
+        monkeypatch.setattr(settings, "ollama_reasoning", False)
+        mock_ollama_cls = MagicMock()
+        with patch.dict("sys.modules", {"langchain_ollama": MagicMock(ChatOllama=mock_ollama_cls)}):
+            get_agent_llm(provider="ollama", model="llama3.2")
+        assert mock_ollama_cls.call_args.kwargs["reasoning"] is None
+
+    def test_ollama_reasoning_enabled_when_configured(self, monkeypatch):
+        from research_swarm.agents.base import get_agent_llm
+        from research_swarm.config import settings
+        monkeypatch.setattr(settings, "ollama_reasoning", True)
+        mock_ollama_cls = MagicMock()
+        with patch.dict("sys.modules", {"langchain_ollama": MagicMock(ChatOllama=mock_ollama_cls)}):
+            get_agent_llm(provider="ollama", model="nemotron-3-nano:30b-cloud")
+        assert mock_ollama_cls.call_args.kwargs["reasoning"] is True
+
+    def test_ollama_reasoning_is_on_by_default(self):
+        """The project default is reasoning enabled (nemotron-3-nano:30b-cloud
+        and friends need it to keep <think> tags out of structured-output
+        parsing -- see recover_from_parse_failure)."""
+        from research_swarm.config import settings
+        assert settings.ollama_reasoning is True
+
     def test_unknown_provider_raises_value_error(self):
         from research_swarm.agents.base import get_agent_llm
         with pytest.raises(ValueError, match="Unsupported provider"):
@@ -1229,6 +1257,81 @@ class TestFaithfulnessRewrite:
         assert result is report
         assert score == pytest.approx(0.5)
 
+    @pytest.mark.asyncio
+    async def test_review_budget_exhausted_skips_rewrite_entirely(self):
+        """The rewrite loop is the one place in the graph that can make
+        several thorough-tier calls with no other gate -- it must respect
+        the review pool's budget like every other LLM call does."""
+        from research_swarm.agents.writer import _faithfulness_rewrite
+        from research_swarm.runtime.budget import clear_budget, get_budget
+
+        session_id = "sess-rewrite-exhausted"
+        clear_budget(session_id)
+        try:
+            get_budget(session_id, limit=0, pool="review")  # already exhausted
+
+            report = self._report()
+            structured_llm = MagicMock()
+            structured_llm.ainvoke = AsyncMock()
+
+            with patch(
+                "research_swarm.eval.faithfulness.score_sections",
+                return_value=[
+                    {"heading": "Weak Section", "score": 0.1, "citations": [1]},
+                    {"heading": "Strong Section", "score": 0.9, "citations": [1]},
+                ],
+            ):
+                result, score = await _faithfulness_rewrite(
+                    report, [], structured_llm, MagicMock(), MagicMock(),
+                    session_id=session_id,
+                )
+
+            assert result is report
+            assert score == pytest.approx(0.5)
+            structured_llm.ainvoke.assert_not_called()
+        finally:
+            clear_budget(session_id)
+
+    @pytest.mark.asyncio
+    async def test_review_budget_available_still_rewrites(self):
+        """Regression guard: the budget gate must not be always-on -- with
+        budget available and a weak section, the rewrite must still fire."""
+        from research_swarm.agents.writer import _faithfulness_rewrite
+        from research_swarm.runtime.budget import clear_budget, get_budget
+
+        session_id = "sess-rewrite-available"
+        clear_budget(session_id)
+        try:
+            get_budget(session_id, limit=10, pool="review")
+
+            report = self._report()
+            rewritten_report = FinalReport(title="T2", exec_summary="S2")
+            structured_llm = MagicMock()
+            structured_llm.ainvoke = AsyncMock(return_value=rewritten_report)
+
+            with patch(
+                "research_swarm.eval.faithfulness.score_sections",
+                side_effect=[
+                    [
+                        {"heading": "Weak Section", "score": 0.1, "citations": [1]},
+                        {"heading": "Strong Section", "score": 0.9, "citations": [1]},
+                    ],
+                    [
+                        {"heading": "Weak Section", "score": 0.9, "citations": [1]},
+                        {"heading": "Strong Section", "score": 0.9, "citations": [1]},
+                    ],
+                ],
+            ):
+                result, score = await _faithfulness_rewrite(
+                    report, [], structured_llm, MagicMock(), MagicMock(),
+                    session_id=session_id,
+                )
+
+            assert result.title == "T2"
+            structured_llm.ainvoke.assert_awaited_once()
+        finally:
+            clear_budget(session_id)
+
 
 # ---------------------------------------------------------------------------
 # _collect_references() and _format_findings() helpers in writer
@@ -1282,3 +1385,36 @@ class TestWriterHelpers:
         text = _format_findings([finding], [])  # empty references list
 
         assert "(no sources)" in text
+
+    def test_format_sources_includes_snippet_text(self):
+        """The writer is graded (faithfulness check) against each source's
+        snippet, so the snippet must actually be in its prompt -- otherwise
+        it's scored on text it never saw."""
+        from research_swarm.agents.writer import _format_sources
+
+        src = Source(
+            url="https://a.com", title="Paper A", snippet="The measured effect was -3.5 points.",
+        )
+        text = _format_sources([src])
+
+        assert "[1] https://a.com -- Paper A" in text
+        assert "The measured effect was -3.5 points." in text
+
+    def test_format_sources_truncates_long_snippets(self):
+        from research_swarm.agents.writer import SNIPPET_CHAR_LIMIT, _format_sources
+
+        src = Source(url="https://a.com", title="Paper A", snippet="x" * (SNIPPET_CHAR_LIMIT + 200))
+        text = _format_sources([src])
+
+        # The excerpt line itself must be bounded, not just "contain" the cap.
+        excerpt_line = next(line for line in text.splitlines() if "Excerpt" in line)
+        assert len(excerpt_line) < SNIPPET_CHAR_LIMIT + 50
+        assert "..." in excerpt_line
+
+    def test_format_sources_omits_excerpt_line_when_snippet_empty(self):
+        from research_swarm.agents.writer import _format_sources
+
+        src = Source(url="https://a.com", title="Paper A", snippet="")
+        text = _format_sources([src])
+
+        assert text == "[1] https://a.com -- Paper A"

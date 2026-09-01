@@ -8,6 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from research_swarm.agents._utils import _field, _latest_verdicts, schema_output_instruction
+from research_swarm.runtime.budget import BudgetExceeded, get_budget
 from research_swarm.schemas import FinalReport, ReportQualityScore, ReportSection, Source
 from research_swarm.schemas.critique import CritiqueVerdict
 
@@ -48,6 +49,11 @@ Guidelines:
     state plainly that the comparison isn't apples-to-apples (e.g. "not
     directly comparable -- measured on a much smaller model") instead of
     presenting mismatched figures as if they were equivalent.
+  - Ground every claim in the source excerpts. Each reference below is listed
+    with an excerpt of its actual text. A section is only as good as its
+    support in those excerpts -- if an excerpt doesn't back a sentence you
+    want to write, either cite a source that does, qualify the sentence, or
+    drop it. Do not extrapolate beyond what the excerpts say.
   - Acknowledge limitations honestly.
   - Incorporate any human feedback provided below.
   - Leave the `references` array EMPTY ([]) — it is populated programmatically
@@ -62,7 +68,7 @@ _FINDINGS_TEMPLATE = (
     "{findings_text}\n\n"
     "Sub-questions to cover:\n"
     "{sub_questions}\n\n"
-    "All sources referenced:\n"
+    "All sources referenced, with an excerpt of each:\n"
     "{sources_text}\n\n"
     "Write the final report now."
 )
@@ -83,6 +89,28 @@ def _collect_references(findings: list) -> list[Source]:
                 seen_urls.add(url)
                 refs.append(e if hasattr(e, "url") else Source(**e))
     return refs
+
+
+# Per-reference cap on how much snippet text goes into the writer's prompt.
+# The faithfulness scorer (eval/faithfulness.py) grades each section against
+# these same snippets -- without them here, the writer is scored on text it
+# was never shown, and the rewrite prompt's "supported by the cited source
+# snippets above" instruction refers to nothing actually in context.
+SNIPPET_CHAR_LIMIT = 400
+
+
+def _format_sources(references: list[Source]) -> str:
+    """Render the reference list with a truncated excerpt of each source."""
+    lines = []
+    for i, r in enumerate(references, 1):
+        snippet = (r.snippet or "").strip().replace("\n", " ")
+        if len(snippet) > SNIPPET_CHAR_LIMIT:
+            snippet = snippet[:SNIPPET_CHAR_LIMIT].rstrip() + "..."
+        line = f"[{i}] {r.url} -- {r.title}"
+        if snippet:
+            line += f'\n    Excerpt: "{snippet}"'
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _format_findings(findings: list, references: list[Source]) -> str:
@@ -154,9 +182,7 @@ async def run_writer(
 
     references = _collect_references(valid_findings)
 
-    sources_text = "\n".join(
-        f"[{i+1}] {r.url} -- {r.title}" for i, r in enumerate(references)
-    )
+    sources_text = _format_sources(references)
     findings_text = _format_findings(valid_findings, references)
     sub_questions = "\n".join(
         f"  - {q}" for q in (plan.sub_questions if plan else [])
@@ -217,6 +243,7 @@ async def run_writer(
     # ------------------------------------------------------------------
     report, faithfulness = await _faithfulness_rewrite(
         report, references, structured_llm, system_msg, user_msg,
+        session_id=state.get("session_id", "default"),
     )
     report = _attach_quality_score(report, faithfulness)
 
@@ -255,6 +282,7 @@ async def _faithfulness_rewrite(
     structured_llm,
     system_msg: SystemMessage,
     original_user_msg: HumanMessage,
+    session_id: str = "default",
 ) -> tuple[FinalReport, float | None]:
     """Return (report, faithfulness_score); rewrite (up to MAX_FAITHFULNESS_REWRITES
     times) while sections remain under-grounded.
@@ -266,6 +294,13 @@ async def _faithfulness_rewrite(
     likely to reproduce the same gaps as fix them. Each subsequent attempt
     re-scores and re-targets only whatever sections are still weak, so a
     section fixed on attempt 1 isn't re-flagged on attempt 2.
+
+    Each iteration checks the session's "review" budget pool before spending
+    another LLM call -- this is the one path in the graph that can make
+    several thorough-tier calls (with a strictly growing message list) with
+    no other gate on it, so without this check it's invisible to both the
+    per-pool call limit and the session-wide token cap. On exhaustion it
+    stops and returns the last good report, same as a natural convergence.
 
     Returns the score alongside the report -- rather than just the report and
     making the caller recompute it -- since this function already runs the
@@ -297,6 +332,15 @@ async def _faithfulness_rewrite(
     for attempt in range(1, MAX_FAITHFULNESS_REWRITES + 1):
         weak_sections = [s for s in section_scores if s["score"] < FAITHFULNESS_THRESHOLD]
         if not weak_sections:
+            return current_report, overall
+
+        try:
+            get_budget(session_id, pool="review").check()
+        except BudgetExceeded as exc:
+            logger.info(
+                "Faithfulness rewrite: %s — keeping report as-is after %d attempt(s).",
+                exc, attempt - 1,
+            )
             return current_report, overall
 
         weak_headings = ", ".join(f"{s['heading']!r} ({s['score']:.2f})" for s in weak_sections)
