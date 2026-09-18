@@ -1,6 +1,8 @@
 """LLM factory -- returns a LangChain ChatModel for use in agents."""
 from __future__ import annotations
 
+import logging
+
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
@@ -11,6 +13,26 @@ from research_swarm.runtime.session_ctx import (
     resolve_ollama_base_url,
     resolve_ollama_deployment,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def without_thinking(llm: BaseChatModel, max_tokens: int | None = None) -> BaseChatModel:
+    """*llm* with thinking disabled (and output capped) where the provider supports it.
+
+    ChatOllama exposes ``reasoning`` / ``num_predict``; Anthropic and OpenAI models have neither
+    and are returned unchanged. Uses ``model_copy`` so callbacks and other settings survive.
+    """
+    if not hasattr(llm, "reasoning"):
+        return llm
+    update: dict[str, object] = {"reasoning": False}
+    if max_tokens and hasattr(llm, "num_predict"):
+        update["num_predict"] = max_tokens
+    try:
+        return llm.model_copy(update=update)
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not disable thinking on %r", llm, exc_info=True)
+        return llm
 
 
 def get_tiered_llm(
@@ -60,16 +82,19 @@ def get_agent_llm(
     provider: str | None = None,
     model: str | None = None,
     temperature: float = 0.1,
+    base_url: str | None = None,
 ) -> BaseChatModel:
     """Return a ChatModel for the given provider / model.
 
     Supported providers:
       - ``"anthropic"``  -- Claude via Anthropic API
       - ``"openai"``     -- GPT via OpenAI API
-      - ``"ollama"``     -- local model via Ollama (no cloud, no API key)
+      - ``"ollama"``     -- a local daemon, or Ollama Cloud directly when *base_url* is
+                            ``https://ollama.com`` (authenticated with the Ollama API key)
 
     Defaults to ``settings.default_model_provider`` and
-    ``settings.default_model_name`` when not specified.
+    ``settings.default_model_name`` when not specified. *base_url* overrides the session's Ollama
+    URL for this one model (the writer uses Ollama Cloud while the rest stays local).
     """
     provider = provider or settings.default_model_provider
     model = model or settings.default_model_name
@@ -102,7 +127,7 @@ def get_agent_llm(
         return ChatOllama(
             model=model,
             temperature=temperature,
-            base_url=resolve_ollama_base_url(),
+            base_url=base_url or resolve_ollama_base_url(),
             client_kwargs=client_kwargs,
             reasoning=settings.ollama_reasoning or None,
         )

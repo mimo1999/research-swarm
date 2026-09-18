@@ -9,15 +9,15 @@ terminated gracefully rather than silently burning through cloud credits.
 Two pools for the CALL-count limit, so that the part of the graph that can
 genuinely run away (the dispatch/worker research loop -- multiple rounds,
 multiple tool turns per worker) doesn't starve the part that can't
-(critic/fact-checker/writer are each one or a few batched calls, not an
+(verifier/writer are each one or a few batched calls, not an
 open-ended loop). Without this split, a worker-loop overrun exhausts the
-*shared* budget before critic ever runs, and every downstream node
+*shared* budget before the verifier ever runs, and every downstream node
 force-degrades in the same breath -- producing a completely empty report
 even when the worker loop gathered good findings before it ran out.
 
   "research" -- supervisor, document pass/workers, dispatch/worker loop.
                 Bounded by settings.max_llm_calls.
-  "review"   -- critic, fact-checker, writer, LLM judge. Bounded by
+  "review"   -- verifier, writer, LLM judge. Bounded by
                 settings.max_review_llm_calls, independently of whatever
                 the research pool used.
 
@@ -253,11 +253,11 @@ def get_budget(session_id: str, limit: int | None = None, pool: str = _DEFAULT_P
     original limit. If *limit* is None, the pool's own setting is used:
     ``settings.max_llm_calls`` for "research" (the dispatch/worker loop --
     the part that can genuinely iterate across rounds and tool turns),
-    ``settings.max_review_llm_calls`` for "review" (critic/fact-checker/
-    writer/judge -- a few batched calls, never an open-ended loop). The two
+    ``settings.max_review_llm_calls`` for "review" (verifier/writer/
+    judge -- a few batched calls, never an open-ended loop). The two
     pools are independent counters: the research loop exhausting its budget
-    does not touch the review pool's remaining allowance, so critic/fact-
-    checker/writer can still produce a real report from whatever findings
+    does not touch the review pool's remaining allowance, so the verifier
+    and writer can still produce a real report from whatever findings
     the research loop gathered before it ran out.
     """
     key = (session_id, pool)

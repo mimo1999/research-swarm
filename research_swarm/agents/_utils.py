@@ -1,11 +1,19 @@
 """Shared helpers used across agent modules."""
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import random
 import re
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
+
+from research_swarm.runtime.limits import current_llm_session, llm_slot
+from research_swarm.runtime.trace import trace_event
+
+logger = logging.getLogger(__name__)
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
@@ -217,3 +225,88 @@ def _latest_verdicts(critiques: list) -> dict[str, str]:
         v = _field(c, "verdict", "")
         latest[fid] = v.value if hasattr(v, "value") else str(v)
     return latest
+
+
+# ---------------------------------------------------------------------------
+# Retry with backoff for transient provider errors
+# ---------------------------------------------------------------------------
+
+_TRANSIENT_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+_TRANSIENT_TEXT = (
+    "too many concurrent requests",
+    "concurrent request slot",
+    "rate limit",
+    "overloaded",
+    "temporarily unavailable",
+    "timed out",
+    "connection reset",
+    "connection error",
+)
+
+
+def is_transient(exc: BaseException) -> bool:
+    """True for errors worth retrying: rate limits, 5xx, timeouts and dropped connections.
+
+    Recognises the status code however the client library exposes it (``status_code`` on
+    Ollama/Anthropic/OpenAI errors, ``response.status_code`` on httpx errors) and falls
+    back to the message text, since some wrappers only keep the string. Parse/validation
+    failures are deliberately NOT transient -- retrying the same prompt rarely fixes those,
+    and callers already have ``recover_from_parse_failure`` for them.
+    """
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+        return True
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int):
+        return status in _TRANSIENT_STATUS
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_TEXT)
+
+
+async def ainvoke_with_retry(
+    runnable: Any,
+    messages: Any,
+    *,
+    attempts: int = 4,
+    base_delay: float = 2.0,
+    max_delay: float = 30.0,
+    session_id: str | None = None,
+    agent: str = "",
+) -> Any:
+    """``await runnable.ainvoke(messages)`` under the process-wide LLM slot, retrying transient
+    errors with jittered backoff.
+
+    Every LLM call in the pipeline goes through here. The slot (``llm_slot``, capped per
+    provider) is held only while a request is in flight and is released during backoff sleeps,
+    so a retrying call never holds capacity another stage could use. Backoff waits ~base,
+    2*base, 4*base ... (capped at *max_delay*, each scaled by a random 0.5-1.0 so parallel
+    workers don't retry in lockstep). Non-transient errors, and the last attempt's error,
+    propagate unchanged. Retries and long slot waits are logged and traced. Each attempt is a
+    real LLM call and counts against the session's call budget.
+
+    *session_id* defaults to the session recorded when the node built its LLM
+    (``runtime.limits.set_llm_context``).
+    """
+    sid = session_id if session_id is not None else current_llm_session.get()
+    for attempt in range(1, attempts + 1):
+        try:
+            async with llm_slot() as waited:
+                if waited >= 1.0:
+                    trace_event(sid, agent or "llm", "note", slot_wait_s=round(waited, 2))
+                return await runnable.ainvoke(messages)
+        except Exception as exc:  # noqa: BLE001
+            if attempt == attempts or not is_transient(exc):
+                raise
+            delay = min(max_delay, base_delay * 2 ** (attempt - 1)) * random.uniform(0.5, 1.0)
+            logger.warning(
+                "%s: transient LLM error (%s: %s) -- retry %d/%d in %.1fs",
+                agent or "LLM call", type(exc).__name__, str(exc)[:120],
+                attempt, attempts - 1, delay,
+            )
+            trace_event(
+                sid, agent or "llm", "note", retry=attempt, delay=round(delay, 2),
+                error=f"{type(exc).__name__}: {str(exc)[:200]}",
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable")  # pragma: no cover

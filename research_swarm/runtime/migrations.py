@@ -8,7 +8,7 @@ necessary migrations in version order so callers always receive a
 Version history:
     0  (implicit) — no schema_version; no model_provider / model_name.
     1  — schema_version added; model_provider / model_name; writer_instructions.
-    2  — Phase 4 fields: active_sub_question, active_worker_role,
+    2  — Phase 4 fields: active_sub_question,
           research_rounds, pre_dispatch_finding_ids.
           ResearchPlan gains complexity_score + assignments.
 
@@ -75,7 +75,7 @@ def _v0_to_v1(state: dict[str, Any]) -> dict[str, Any]:
 def _v1_to_v2(state: dict[str, Any]) -> dict[str, Any]:
     """v1 → v2: add Phase-4 dispatch / stop-signal fields.
 
-    - active_sub_question / active_worker_role: per-worker Send fields;
+    - active_sub_question: per-worker Send field;
       None is correct for any non-worker checkpoint.
     - research_rounds: how many dispatch→collect cycles have completed;
       default 0 so migrated sessions start a fresh research loop.
@@ -86,7 +86,6 @@ def _v1_to_v2(state: dict[str, Any]) -> dict[str, Any]:
     patched = dict(state)
 
     patched.setdefault("active_sub_question",       None)
-    patched.setdefault("active_worker_role",         None)
     patched.setdefault("research_rounds",            0)
     patched.setdefault("pre_dispatch_finding_ids",   [])
 
