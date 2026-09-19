@@ -12,6 +12,7 @@ article-page URL branches below.
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 from bs4 import BeautifulSoup
@@ -40,6 +41,25 @@ def _strip_html(text: str) -> str:
     return BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
 
 
+def _get_with_retry(params: dict, attempts: int = 3) -> httpx.Response:
+    """GET the search endpoint, retrying 429/5xx/transport errors with backoff."""
+    for attempt in range(attempts):
+        try:
+            resp = httpx.get(_SEARCH_URL, params=params, timeout=_TIMEOUT)
+            if resp.status_code != 429 and resp.status_code < 500:
+                resp.raise_for_status()
+                return resp
+            err: Exception = httpx.HTTPStatusError(
+                f"HTTP {resp.status_code}", request=resp.request, response=resp,
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            err = exc
+        if attempt == attempts - 1:
+            raise err
+        time.sleep(0.8 * 2 ** attempt)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 def _article_url(result: dict) -> str:
     """Encode what fetch_worker_node needs to decide on a full-text fetch, the
     same way arxiv_tool.py's abs-page URL lets fetch_worker_node derive a PDF
@@ -64,17 +84,9 @@ def europe_pmc_search(query: str, max_results: int = 5) -> list[dict]:
     Returns JSON-serialisable Source dicts.
     """
     try:
-        resp = httpx.get(
-            _SEARCH_URL,
-            params={
-                "query": query,
-                "format": "json",
-                "resultType": "core",
-                "pageSize": max_results,
-            },
-            timeout=_TIMEOUT,
+        resp = _get_with_retry(
+            {"query": query, "format": "json", "resultType": "core", "pageSize": max_results},
         )
-        resp.raise_for_status()
         results = resp.json().get("resultList", {}).get("result", [])
     except Exception as exc:
         logger.warning(

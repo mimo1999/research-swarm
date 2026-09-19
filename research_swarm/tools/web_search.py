@@ -34,7 +34,7 @@ def is_configured() -> bool:
     server-funded or not available at all. Deployments that don't fund it
     (e.g. the Hugging Face Space) should skip web_search entirely rather
     than call it and get back a useless "[Search error: ...]" placeholder
-    source for every query. Callers: _get_researcher_tools/fetch_worker_node
+    source for every query. Callers: the paper scout and gap fill
     in graph/nodes.py.
     """
     return bool(settings.tavily_api_key.get_secret_value())

@@ -15,8 +15,24 @@ class Finding(BaseModel):
         default=0.5,
         ge=0.0,
         le=1.0,
-        description="Confidence in the claim (updated by fact-checker)",
+        description="Confidence in the claim (set by the verifier)",
     )
     sub_question: str = Field(
         default="", description="The sub-question this finding addresses"
+    )
+    grounding: str = Field(
+        default="unknown",
+        description=(
+            "How the evidence snippet was obtained: quote (the model's quote was found in the "
+            "source), passage (best lexical passage for the claim), none (no supporting text), "
+            "unknown (a path that does not ground). Treat unknown like passage."
+        ),
+    )
+    relevance: str = Field(
+        default="unknown",
+        description=(
+            "Whether the fact answers the question as asked: direct, background (context on the "
+            "general subject, outside the question's specific scope), off_topic, or unknown. "
+            "Set by the extractor, revised by the verifier."
+        ),
     )

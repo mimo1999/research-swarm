@@ -12,7 +12,7 @@ class CritiqueVerdict(StrEnum):
 
 
 class Critique(BaseModel):
-    # Optional so Pydantic accepts null from the LLM; critic.py always overwrites
+    # Optional so Pydantic accepts null from the LLM; the verifier always overwrites
     # with the real UUID via model_copy before appending to the critiques list.
     finding_id: str | None = Field(None, description="ID of the Finding being critiqued")
     verdict: CritiqueVerdict = Field(..., description="Evaluation verdict")

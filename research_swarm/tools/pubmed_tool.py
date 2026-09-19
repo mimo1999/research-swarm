@@ -9,6 +9,8 @@ before arxiv_search -- see the ``academic`` role's strategy in workers.py.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import xml.etree.ElementTree as ET
 
 import httpx
@@ -35,16 +37,49 @@ def _api_key_params() -> dict:
     return {"api_key": key} if key else {}
 
 
+# NCBI allows ~3 requests/s per IP without an API key, 10/s with one. Parallel
+# scouts/workers share that budget, so calls are spaced process-wide and a 429
+# is retried with backoff instead of silently returning no results.
+_throttle_lock = threading.Lock()
+_last_call = 0.0
+_MAX_ATTEMPTS = 4
+
+
+def _throttle() -> None:
+    global _last_call
+    interval = 0.11 if settings.ncbi_api_key.get_secret_value() else 0.36
+    with _throttle_lock:
+        wait = _last_call + interval - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _last_call = time.monotonic()
+
+
+def _ncbi_get(url: str, params: dict) -> httpx.Response:
+    for attempt in range(_MAX_ATTEMPTS):
+        _throttle()
+        try:
+            resp = httpx.get(url, params=params, timeout=_TIMEOUT)
+            if resp.status_code != 429 and resp.status_code < 500:
+                resp.raise_for_status()
+                return resp
+            err: Exception = httpx.HTTPStatusError(
+                f"HTTP {resp.status_code}", request=resp.request, response=resp,
+            )
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            err = exc
+        if attempt == _MAX_ATTEMPTS - 1:
+            raise err
+        time.sleep(0.8 * 2 ** attempt)
+    raise RuntimeError("unreachable")  # pragma: no cover
+
+
 def _esearch_pmids(query: str, max_results: int) -> list[str]:
-    resp = httpx.get(
+    resp = _ncbi_get(
         f"{_EUTILS_BASE}/esearch.fcgi",
-        params={
-            "db": "pubmed", "term": query, "retmode": "json", "retmax": max_results,
-            **_api_key_params(),
-        },
-        timeout=_TIMEOUT,
+        {"db": "pubmed", "term": query, "retmode": "json", "retmax": max_results,
+         **_api_key_params()},
     )
-    resp.raise_for_status()
     return resp.json().get("esearchresult", {}).get("idlist", [])
 
 
@@ -52,15 +87,11 @@ def _efetch_articles(pmids: list[str]) -> dict[str, dict]:
     """Return {pmid: {"title", "abstract", "journal", "year"}} via EFetch XML."""
     if not pmids:
         return {}
-    resp = httpx.get(
+    resp = _ncbi_get(
         f"{_EUTILS_BASE}/efetch.fcgi",
-        params={
-            "db": "pubmed", "id": ",".join(pmids), "rettype": "abstract", "retmode": "xml",
-            **_api_key_params(),
-        },
-        timeout=_TIMEOUT,
+        {"db": "pubmed", "id": ",".join(pmids), "rettype": "abstract", "retmode": "xml",
+         **_api_key_params()},
     )
-    resp.raise_for_status()
     root = ET.fromstring(resp.content)
 
     out: dict[str, dict] = {}
