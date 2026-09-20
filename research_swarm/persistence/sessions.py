@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -132,7 +131,6 @@ def delete_session(thread_id: str) -> int:
 
     Removes:
     - All rows in the ``checkpoints`` and ``writes`` tables for this thread.
-    - The session's ChromaDB directory (``data/sessions/<thread_id>/chroma``).
 
     Returns the number of checkpoint rows deleted.
     """
@@ -163,17 +161,6 @@ def delete_session(thread_id: str) -> int:
                 pass
         finally:
             conn.close()
-
-    # Remove the Chroma vector store for this session
-    chroma_dir = settings.sessions_dir / thread_id
-    if chroma_dir.exists():
-        try:
-            shutil.rmtree(chroma_dir)
-        except OSError as exc:
-            import logging
-            logging.getLogger(__name__).warning(
-                "Could not remove session directory %s: %s", chroma_dir, exc
-            )
 
     return rows_deleted
 

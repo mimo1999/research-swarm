@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     # App settings
     default_model_provider: str = "ollama"
-    default_model_name: str = "nemotron-3-nano:30b-cloud"
+    default_model_name: str = "gemma4:e2b"
     default_depth: str = "shallow"
     max_iterations: int = 1
     max_sources: int = 3
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # the part that can genuinely run away (multiple rounds, multiple tool
     # turns per worker). Raises BudgetExceeded above this.
     max_llm_calls: int = 40
-    # "review" pool: critic, fact-checker, writer, LLM judge -- a few batched
+    # "review" pool: verifier, writer, LLM judge -- a few batched
     # calls, never an open-ended loop. Kept separate from max_llm_calls so a
     # research-loop overrun can't starve these out and leave an empty report
     # with good findings sitting unused. See runtime/budget.py.
@@ -56,15 +56,48 @@ class Settings(BaseSettings):
     # guardrail that matters for a shared/rate-limited key (e.g. Ollama
     # Cloud's account-wide allowance) -- see runtime/budget.py.
     max_tokens_per_session: int = 200_000
-    # Fan-out fetch pass (route_from_document_pass -> fetch_worker_node): over-fetch
-    # this many candidates per tool per sub-question BEFORE round-0 dispatch,
-    # deep-embedding each into the session's RAG index so retrieve_from_rag has
-    # real substance from round 1 instead of only what workers' own live
-    # searches turn up mid-round.
-    fetch_pass_results_per_tool: int = 8
+    # Paper scout (route_from_document_pass -> paper_scout_node): results requested from
+    # each literature tool per query. Search is cheap (no LLM, ~1-3 s, concurrent), so this is
+    # set wide; the code pre-filter below narrows it before the LLM scorer.
+    fetch_pass_results_per_tool: int = 12
+    relevance_threshold: float = 0.75
+    # Cap on papers handed to the paper worker per sub-question (best-scoring first).
+    paper_max_per_sub_question: int = 6
+    # Candidates per sub-question entering its scoring call (the LLM cost: each one is read).
+    paper_max_candidates: int = 24
+    # Candidates per sub-question gathered (round-robin across tools / queries) before the
+    # code pre-filter (papers.prefilter_candidates) picks the paper_max_candidates to score.
+    paper_prefilter_pool: int = 48
+    # Deep read (agents/deep_read.py): full text of this many top primary arXiv papers, cut to
+    # the passages that best match the question, is added to their abstracts before extraction.
+    # No extra LLM call; each adds up to deep_read_chars to one extraction call's input.
+    deep_read_papers: int = 2
+    deep_read_chars: int = 6000
+    deep_read_timeout_s: float = 20.0
+    paper_max_findings_per_sub_question: int = 6
+    # A sub-question that keeps no non-web paper retries the search tools its routing skipped.
+    # relevance_threshold / relevance_floor / paper_min_per_sub_question define the strict
+    # (>= 0.75) rule and its top-up that benchmarks/relevance_benchmark.py compares top-k against.
+    paper_min_per_sub_question: int = 3
+    relevance_floor: float = 0.6
     # Off-switch with no code change, matching space_mode/llm_judge_enabled --
-    # this pass adds real latency (HTTP + embedding work) before round 0 starts.
+    # this pass adds latency (searches + one scoring call) before round 0 starts.
     enable_fetch_pass: bool = True
+    # Max document workers (one per uploaded document / oversized-document slice) calling
+    # the LLM at once within a run. The provider allows only a few concurrent requests per
+    # account, and an uncapped fan-out over many documents drew 429s that silently dropped
+    # their evidence. See runtime/limits.py.
+    document_worker_concurrency: int = 3
+    # Process-wide cap on in-flight LLM requests per provider, across every stage (see
+    # runtime/limits.py::llm_slot). Ollama Cloud allows roughly one long request at a time per
+    # account and queues or rejects the rest with 429s; hosted APIs tolerate far more.
+    # 0 = unlimited. Separate processes (UI + API + a benchmark) still share one account.
+    max_concurrent_llm_calls_ollama: int = 2
+    max_concurrent_llm_calls_anthropic: int = 8
+    max_concurrent_llm_calls_openai: int = 8
+    # Ollama Cloud called directly (the writer's endpoint, below) -- its own pool, so the writer's
+    # cloud calls don't queue behind the local daemon's.
+    max_concurrent_llm_calls_ollama_cloud: int = 2
     data_dir: Path = Path("data")
 
     # ── Hosted-deployment mode (e.g. Hugging Face Spaces) ───────────────────
@@ -77,26 +110,19 @@ class Settings(BaseSettings):
     #   - app.py caps concurrent graph runs at space_max_concurrent_runs via
     #     an in-process semaphore, so one Streamlit server process handling
     #     several simultaneous users can't be driven into memory exhaustion
-    #     by the embedding/reranker models each run holds.
+    #     by each run's in-flight search results and LLM calls.
     space_mode: bool = False
     space_retention_seconds: int = 21600   # 6 hours
     space_max_sessions: int = 40
     space_max_concurrent_runs: int = 4
 
-    # Local RAG -- embeddings (HuggingFace, runs fully on CPU)
-    embed_model_name: str = "BAAI/bge-small-en-v1.5"
-    embed_cache_dir: str = ""          # empty -> ~/.cache/huggingface
-    chunk_size: int = 512
-    chunk_overlap: int = 50
-
     # Ollama — shared for both local and cloud deployments.
     # In cloud mode the local daemon (same URL) proxies requests to Ollama's
     # cloud infrastructure using the credentials from `ollama login`.
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "gemma4:31b-cloud"
+    ollama_model: str = "gemma4:e2b"
     ollama_cloud_model: str = "gemma4:31b-cloud"
-    ollama_timeout: float = 120.0      # seconds
-    ollama_deployment: str = "cloud"   # "local" | "cloud"
+    ollama_deployment: str = "local"   # "local" | "cloud"
     # Reasoning/"thinking" models (see https://ollama.com/search?c=thinking)
     # otherwise interleave <think>...</think> tags into the main response
     # content by default, which lands inside whatever with_structured_output
@@ -105,11 +131,24 @@ class Settings(BaseSettings):
     # reasoning into AIMessage.additional_kwargs['reasoning_content'] instead,
     # leaving `content` clean. No effect on models that don't support it.
     ollama_reasoning: bool = True
+    # Stages that produce structured JSON run with thinking OFF regardless of ollama_reasoning.
+    # Measured on nemotron-3-nano with the real prompts: valid JSON in every clean trial at
+    # 2-3x the speed (writer ~22 s vs ~470 s and only 1/3 valid with thinking on). Thinking
+    # holds the provider's single slot for tens of seconds per call, which feeds the 429s.
+    # Stage = the `agent=` label given to _get_tiered_state_llm, minus any "[detail]"/"/role"
+    # suffix. Unlisted stages keep ollama_reasoning.
+    no_thinking_stages: list[str] = [
+        "supervisor", "expansion", "writer", "judge", "verifier", "gap_fill",
+        "paper_scout", "paper_worker", "document_worker",
+    ]
+    # Output cap for those stages, so a runaway generation can't hold the slot for minutes
+    # (a writer once produced 131k tokens of empty output over ~7 minutes).
+    no_thinking_max_tokens: int = 8192
 
     # ── Model tiers ──────────────────────────────────────────────────────────
     # Each tier maps to a (provider, model) pair.  Nodes pick the tier that
     # matches their role in the pipeline:
-    #   fast      -- cheap/quick:  structured extraction (critic, fact-checker)
+    #   fast      -- cheap/quick:  structured extraction (verifier, paper scout)
     #   standard  -- smallest capable: research workers -- called once per
     #                sub-question per tool turn, so call *volume* is highest
     #                here; keep this the cheapest tier that can still reliably
@@ -122,56 +161,90 @@ class Settings(BaseSettings):
     #
     # Defaults reuse the Ollama stack so no extra API key is required.
     tier_fast_provider:     str = "ollama"
-    tier_fast_model:        str = "nemotron-3-nano:30b-cloud"
+    tier_fast_model:        str = "gemma4:e2b"
     tier_standard_provider: str = "ollama"
     # tier_standard_model is the generic fallback; get_tiered_llm overrides it
     # per-provider below with each provider's lowest-grade model, since the
     # worker tier's whole point is "smallest model that still works reliably".
-    tier_standard_model:           str = "gpt-oss:20b-cloud"
-    tier_standard_model_local:     str = "gemma4:4b"                    # ollama, local daemon
+    tier_standard_model:           str = "gemma4:e2b"
+    tier_standard_model_local:     str = "gemma4:e2b"                    # ollama, local daemon
     tier_standard_model_cloud:     str = "nemotron-3-nano:30b-cloud"    # ollama, cloud-hosted
     tier_standard_model_anthropic: str = "claude-haiku-4-5-20251001"
     tier_standard_model_openai:    str = "gpt-5-nano"
     tier_thorough_provider: str = "ollama"
-    tier_thorough_model:    str = "nemotron-3-nano:30b-cloud"
+    tier_thorough_model:    str = "gemma4:e2b"
+
+    # ── Large model for the few stages that need it (its own endpoint) ────────
+    # Every other stage uses the tiers above (local gemma4). The stages in large_model_stages use
+    # a larger model: by default Ollama Cloud called directly (https://ollama.com, authenticated
+    # with OLLAMA_API_KEY) while the rest stays on the local daemon.
+    #   writer     -- turns ~30 verified facts into a structured report; a 2B model used 5 of 23.
+    #   supervisor -- the question frame (query expansion) and the research plan, one call each;
+    #                 gemma4 wrote long, sentence-like search queries that retrieved mostly blogs,
+    #                 and every later stage inherits those queries.
+    # large_model="" = every stage uses its tier.
+    large_model_provider: str = "ollama"
+    large_model: str = "nemotron-3-nano:30b-cloud"
+    large_model_ollama_base_url: str = "https://ollama.com"   # "" = the normal OLLAMA_BASE_URL
+    large_model_stages: list[str] = ["supervisor", "writer"]
+    # "sectioned": outline call -> one call per section (with that section's facts, evidence
+    # and sources) -> a final review call that fixes or deletes unsupported sentences and writes
+    # the answer and summary (agents/writer_sections.py). "single": one call for the whole draft.
+    writer_mode: str = "sectioned"
+
+    # ── Sub-questions per plan, by depth ─────────────────────────────────────
+    # The main compute knob: each sub-question costs one relevance-scoring and one extraction
+    # call (plus a gap-fill worker if its coverage is thin). Measured on local gemma4: ~24 s
+    # scoring + ~33 s extraction, i.e. ~55 s per sub-question, ~35-40 s of wall time with two
+    # calls in flight. Research is meant to run locally (the cloud large model only guards the
+    # planner and writer, and can be dropped on a bigger GPU); a shallow run of 6 measured 458 s.
+    sub_questions_by_depth: dict[str, int] = {"shallow": 6, "standard": 8, "deep": 10}
 
     # ── Research-loop limits by depth ────────────────────────────────────────
     # Maximum dispatch→workers→collect cycles before forcing progression
-    # to the critic regardless of the stop-signal score.
+    # to the verifier regardless of the stop-signal score.
     max_research_rounds_shallow:  int = 1
     max_research_rounds_standard: int = 3
     max_research_rounds_deep:     int = 4
 
-    # Per-finding cap on rework rounds after a weak/refuted critique verdict.
-    # Independent of max_research_rounds (which bounds total rounds across all
-    # findings) -- this bounds how many times any single finding gets
-    # re-researched, so one chronically-bad finding can't hog rounds that
-    # would otherwise go to others.
-    max_rework_attempts: int = 3
-
     # ── Stop-signal thresholds ───────────────────────────────────────────────
     # Fraction of new findings considered novel (below = stop).
     stop_novelty_threshold:    float = 0.15
-    # Mean cosine similarity of new vs existing finding claims (above = stop).
-    stop_similarity_threshold: float = 0.85
-
-    # ── Judge batching ───────────────────────────────────────────────────────
-    # Critic and fact-checker review this many findings per LLM call instead of
-    # one call each — cuts repeated system-prompt and shared-source token cost.
-    judge_batch_size: int = 8
 
     # ── LLM-as-a-judge review pipeline ──────────────────────────────────────
     # Independent LLM review pass over the writer's final report — catches
-    # issues the embedding-based faithfulness check can't (wrong topic,
+    # issues a mechanical check can't (wrong topic,
     # unaddressed sub-questions, incoherent prose, citations to nothing).
     # Runs on the cheap 'fast' tier since it's a review, not generation.
-    llm_judge_enabled: bool = True
+    # Off by default: the review is one more request on the provider's scarce slots, and offline
+    # judging (benchmarks/score_claims.py) is the measurement path. The UI has a toggle.
+    llm_judge_enabled: bool = False
+
+    # ── Evidence extraction, verification and writing (see benchmarks/README.md) ────────────
+    # Documents are packed into batches of this many characters, one extraction call each
+    # (agents/extractor.py); each fact's evidence is located in its source (agents/grounding.py).
+    extract_batch_chars: int = 12_000
+    extract_max_facts_per_pair: int = 3
+    # Findings passed to the verifier / writer, best grounded first.
+    # 6 sub-questions x up to 6 facts each (paper_max_findings_per_sub_question).
+    max_facts_for_writer: int = 36
+    # A sub-question with fewer grounded findings than this after the paper/document pass is
+    # sent to gap fill (search -> fetch -> one extraction call).
+    min_grounded_facts: int = 1
+    # Paper selection keeps the best paper_max_per_sub_question papers scoring at least this.
+    paper_topk_floor: float = 0.5
+
+    # ── Question frame (agents/expansion.py) ────────────────────────────────────────────────
+    # Before planning: search the literal question (probe, no LLM) and extract its distinguishing
+    # constraint in one short call. Planning, search, scoring, coverage, verification and writing
+    # then enforce it in code. False = plan exactly as before (empty frame everywhere).
+    query_expansion_enabled: bool = True
+    probe_results: int = 8
+    # Optional "Analysis (reasoning, not from sources)" section: uncited, number-free sentences
+    # for conceptual questions. Excluded from citation/faithfulness scoring.
+    writer_reasoning_section: bool = False
     llm_judge_tier: str = "fast"
     llm_judge_pass_threshold: float = 3.5
-
-    @property
-    def sessions_dir(self) -> Path:
-        return self.data_dir / "sessions"
 
     def max_research_rounds(self, depth: str) -> int:
         """Return the research-loop cap for the given depth string."""

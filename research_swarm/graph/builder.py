@@ -10,7 +10,7 @@ from langgraph.graph import END, START, StateGraph
 
 import research_swarm.graph.nodes as _nodes
 from research_swarm.config import settings
-from research_swarm.graph.edges import route_from_collect, route_from_critic, route_from_supervisor
+from research_swarm.graph.edges import route_from_collect, route_from_supervisor
 from research_swarm.schemas.state import AgentState
 
 # ---------------------------------------------------------------------------
@@ -26,6 +26,7 @@ _SCHEMA_MODULES: list[tuple[str, str]] = [
     ("research_swarm.schemas.worker",   "WorkerRole"),
     ("research_swarm.schemas.worker",   "SubQuestionAssignment"),
     ("research_swarm.schemas.plan",     "ResearchPlan"),
+    ("research_swarm.schemas.frame",    "QuestionFrame"),
     ("research_swarm.schemas.finding",  "Finding"),
     ("research_swarm.schemas.source",   "SourceType"),
     ("research_swarm.schemas.source",   "Source"),
@@ -95,15 +96,13 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
     sg.add_node("supervisor",           _nodes.supervisor_node)
     sg.add_node("document_pass_node",   _nodes.document_pass_node)
     sg.add_node("document_worker_node", _nodes.document_worker_node)
-    sg.add_node("fetch_worker_node",    _nodes.fetch_worker_node)
+    sg.add_node("paper_scout_node",     _nodes.paper_scout_node)
+    sg.add_node("paper_worker_node",    _nodes.paper_worker_node)
     sg.add_node("dispatch_node",        _nodes.dispatch_node)
     sg.add_node("worker_node",          _nodes.worker_node)
     sg.add_node("collect_node",         _nodes.collect_node)
-    sg.add_node("critic",               _nodes.critic_node)
-    sg.add_node("fact_checker",         _nodes.fact_checker_node)
+    sg.add_node("verifier",             _nodes.verifier_node)
     sg.add_node("writer",               _nodes.writer_node)
-    # Legacy researcher node kept so old tests / checkpoints continue to work
-    sg.add_node("researcher",           _nodes.researcher_node)
 
     # ── Entry ──────────────────────────────────────────────────────────────
     sg.add_edge(START, "supervisor")
@@ -115,51 +114,52 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
         {"document_pass_node": "document_pass_node", END: END},
     )
 
-    # document_pass_node → [document_worker_node × N] + [fetch_worker_node × N]
+    # document_pass_node → [document_worker_node × N] + [paper_scout_node × N]
     # via one Send fan-out (heterogeneous target nodes in one list), or a
     # bounce straight to dispatch_node when there's no plan yet
     sg.add_conditional_edges(
         "document_pass_node",
         _nodes.route_from_document_pass,   # returns list[Send]
+        # path_map doesn't affect routing (Send targets decide that) -- it's the documented
+        # possible destinations so graph.get_graph() (the UI's live topology diagram) can draw
+        # this fan-out; without it, LangGraph can't infer a Send-returning function's targets
+        # and silently drops the edge.
+        ["document_worker_node", "paper_scout_node", "dispatch_node"],
     )
 
     # All parallel document workers converge at dispatch_node (outputs
     # merged by the findings reducer) for the normal round-0 sub-question
     # dispatch, which now skips any sub-question the document pass answered.
-    sg.add_edge("document_worker_node", "dispatch_node")
+    # All pre-research workers (document workers, paper scouts) run in the same
+    # superstep and converge at paper_worker_node, which turns the scouts'
+    # relevance-filtered corpus into findings (a no-op when there is no
+    # corpus), then hands off to dispatch_node once.
+    sg.add_edge("document_worker_node", "paper_worker_node")
 
-    # fetch_worker_node makes no LLM call and produces no findings -- it only
-    # deep-embeds search results into the session's RAG index before round 0.
-    sg.add_edge("fetch_worker_node", "dispatch_node")
+    # paper_scout_node: search + light-LLM relevance filter -> paper_corpus.
+    sg.add_edge("paper_scout_node", "paper_worker_node")
+    sg.add_edge("paper_worker_node", "dispatch_node")
 
     # dispatch_node → [worker_node × N]  via Send fan-out
     sg.add_conditional_edges(
         "dispatch_node",
         _nodes.route_from_dispatch,   # returns list[Send]
+        ["worker_node", "collect_node"],   # see the document_pass_node path_map note above
     )
 
     # All parallel workers converge at collect_node (outputs merged by reducers)
     sg.add_edge("worker_node", "collect_node")
 
-    # collect_node → dispatch_node (re-research) OR critic (stop)
+    # collect_node → dispatch_node (re-research) OR verifier (stop)
     sg.add_conditional_edges(
         "collect_node",
         route_from_collect,
-        {"dispatch_node": "dispatch_node", "critic": "critic"},
+        {"dispatch_node": "dispatch_node", "verifier": "verifier"},
     )
 
-    # ── Post-critic pipeline (deterministic) ──────────────────────────────
-    # critic → dispatch_node (rework weak/refuted findings, capped) OR fact_checker
-    sg.add_conditional_edges(
-        "critic",
-        route_from_critic,
-        {"dispatch_node": "dispatch_node", "fact_checker": "fact_checker"},
-    )
-    sg.add_edge("fact_checker", "writer")
-    sg.add_edge("writer",       END)
-
-    # ── Legacy researcher loop (for backward-compat) ──────────────────────
-    sg.add_edge("researcher", "collect_node")
+    # verifier → writer → END (HITL pauses before the writer when enabled)
+    sg.add_edge("verifier", "writer")
+    sg.add_edge("writer",   END)
 
     compile_kwargs: dict[str, Any] = {"checkpointer": checkpointer}
     if interrupt_before_writer:

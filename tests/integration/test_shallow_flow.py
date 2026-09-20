@@ -1,8 +1,8 @@
 """Integration test: shallow research flow through the Phase 4 graph topology.
 
 Exercises the full graph pipeline with mocked nodes (no LLM/API calls):
-  supervisor → dispatch_node → worker_node(s) → collect_node → critic →
-  fact_checker → writer → END
+  supervisor → dispatch_node → worker_node(s) → collect_node → verifier →
+  verifier → writer → END
 
 Also verifies:
   - Schema migration v0 → v2
@@ -116,13 +116,16 @@ async def test_shallow_research_flow():
     async def fake_fc(state):
         return {"findings": [fc_finding], "messages": []}
 
+    async def fake_verifier(state):
+        return {"findings": [fc_finding], "critiques": [critique], "messages": []}
+
     async def fake_writer(state):
         return {
             "final_report": report, "draft_report": report,
             "writer_instructions": None, "messages": [],
         }
 
-    async def fake_fetch_worker_node(state):
+    async def fake_paper_scout_node(state):
         return {"messages": []}
 
     checkpointer = MemorySaver(serde=_serde)
@@ -132,10 +135,9 @@ async def test_shallow_research_flow():
     with (
         patch.object(_nodes, "supervisor_node",    fake_supervisor),
         patch.object(_nodes, "worker_node",        fake_worker),
-        patch.object(_nodes, "fetch_worker_node",  fake_fetch_worker_node),
+        patch.object(_nodes, "paper_scout_node",  fake_paper_scout_node),
         patch.object(_nodes, "collect_node",       fake_collect),
-        patch.object(_nodes, "critic_node",        fake_critic),
-        patch.object(_nodes, "fact_checker_node",  fake_fc),
+        patch.object(_nodes, "verifier_node",      fake_verifier),
         patch.object(_nodes, "writer_node",        fake_writer),
     ):
         graph  = build_graph(checkpointer=checkpointer, interrupt_before_writer=False)

@@ -7,10 +7,7 @@ Phase-4 topology — all routing after plan creation is deterministic.
                                 or a bounce straight to "dispatch_node" when
                                 there are none (in nodes.py)
   route_from_dispatch        → list[Send], one per target sub-question (in nodes.py)
-  route_from_collect         → "dispatch_node" (loop) or "critic" (stop)
-  route_from_critic          → "dispatch_node" (rework weak/refuted findings,
-                                capped by settings.max_rework_attempts) or
-                                "fact_checker" (done)
+  route_from_collect         → "dispatch_node" (loop) or "verifier" (stop)
 """
 from __future__ import annotations
 
@@ -44,16 +41,7 @@ def route_from_supervisor(state: AgentState) -> str:
 
 
 def route_from_collect(state: AgentState) -> str:
-    """After collect_node: route to dispatch_node (loop) or critic (stop)."""
-    next_agent = state.get("next_agent", "critic")
-    if str(next_agent) == "dispatch":
+    """After collect_node: route to dispatch_node (loop), or on stop to the verifier."""
+    if str(state.get("next_agent", "verifier")) == "dispatch":
         return "dispatch_node"
-    return "critic"
-
-
-def route_from_critic(state: AgentState) -> str:
-    """After critic_node: loop back to dispatch_node for rework, or proceed to fact_checker."""
-    next_agent = state.get("next_agent", "fact_checker")
-    if str(next_agent) == "dispatch":
-        return "dispatch_node"
-    return "fact_checker"
+    return "verifier"

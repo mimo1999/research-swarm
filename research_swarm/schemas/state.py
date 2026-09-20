@@ -5,6 +5,7 @@ from typing_extensions import NotRequired, TypedDict
 
 from .critique import Critique
 from .finding import Finding
+from .frame import QuestionFrame
 from .plan import ResearchPlan
 from .query import ResearchQuery
 from .report import FinalReport
@@ -18,7 +19,7 @@ def _add_list(existing: list, new: list) -> list:
 def _merge_findings(existing: list, new: list) -> list:
     """Merge findings by id -- new items with matching ids overwrite existing ones.
 
-    This lets the fact-checker return updated Finding objects (same id,
+    This lets the verifier return updated Finding objects (same id,
     revised confidence) without duplicating the list.
     """
     merged: dict = {}
@@ -50,8 +51,7 @@ def _last_value(existing, new):  # noqa: ARG001
 
 
 AgentName = Literal[
-    "supervisor", "researcher", "critic", "writer", "fact_checker",
-    "dispatch", "collect", "human", "end",
+    "supervisor", "verifier", "writer", "dispatch", "collect", "human", "end",
 ]
 
 
@@ -63,7 +63,7 @@ class AgentState(TypedDict):
     query: ResearchQuery | None
     plan: ResearchPlan | None
 
-    # Findings: merge-by-id so fact_checker can overwrite confidence
+    # Findings: merge-by-id so the verifier can overwrite confidence
     findings: Annotated[list[Finding], _merge_findings]
     # Critiques: append-only (one critique per finding per pass)
     critiques: Annotated[list[Critique], _add_list]
@@ -101,7 +101,6 @@ class AgentState(TypedDict):
 
     # Per-worker state injected via Send; cleared after each dispatch round.
     active_sub_question: NotRequired[str | None]
-    active_worker_role:  NotRequired[str | None]
 
     # How many dispatch→workers→collect cycles have completed.
     research_rounds: NotRequired[int]
@@ -110,35 +109,53 @@ class AgentState(TypedDict):
     # collect_node uses this to identify which findings are newly produced.
     pre_dispatch_finding_ids: NotRequired[list[str]]
 
-    # How many times each sub-question (normalised, lowercased) has been sent
-    # back for rework after a weak/refuted critique verdict. Capped by
-    # settings.max_rework_attempts so one persistently-bad finding can't
-    # consume unbounded rework rounds. Incremented in collect_node once a
-    # rework round completes; read by critic_node (loop-back decision) and
-    # _research_targets (dispatch/route_from_dispatch fan-out).
-    rework_counts: NotRequired[dict[str, int]]
-
-    # --- Document pass: one-time full-document extraction, no Chroma ---
+    # --- Document pass: one-time extraction over uploaded documents ---
 
     # User-uploaded documents ingested before the graph starts, each
     # {"url", "title", "text", "source_type"}. Populated once in app.py.
     # Consumed exactly once by document_pass_node/route_from_document_pass
-    # (fans out one worker per document, or per size-bounded slice of an
-    # oversized one) before round-0 dispatch -- not re-processed on later
-    # rounds since the documents themselves don't change mid-session.
+    # (packed into extraction batches, one call each) before round-0 dispatch --
+    # not re-processed on later rounds since the documents don't change mid-session.
     ingested_documents: NotRequired[list[dict]]
 
-    # Per-document-worker state injected via Send; cleared after that
-    # worker's single call (mirrors active_sub_question/active_worker_role
-    # above, but for the document pass instead of the sub-question dispatch).
-    active_document:        NotRequired[dict | None]
-    active_doc_part_text:   NotRequired[str | None]
-    active_doc_part_index:  NotRequired[int]
-    active_doc_part_total:  NotRequired[int]
     sub_questions_snapshot: NotRequired[list[str]]
 
-    # Per-fetch-worker state injected via Send; cleared after that worker's
-    # single call. Mirrors active_document above, but for the one-time
-    # deep-fetch-and-embed pass (route_from_document_pass -> fetch_worker_node)
-    # instead of the uploaded-document extraction pass.
-    active_fetch_query: NotRequired[str | None]
+    # --- Paper scout pass: relevance-filtered abstract corpus ---
+
+    # Papers that passed the relevance threshold, each {"sub_question", "url",
+    # "title", "snippet" (abstract), "source_type", "score", "credibility_score"}.
+    # Append-only: one paper_scout_node per sub-question writes its own slice.
+    # Consumed by paper_worker_node, which turns them into findings.
+    paper_corpus: NotRequired[Annotated[list[dict], _add_list]]
+
+    # Send payload for paper_scout_node: one {"sub_question", "search_query",
+    # "domain"} per plan sub-question. The scout handles all of them in one
+    # node so candidate papers are deduplicated and scored in a single pass.
+    scout_tasks: NotRequired[list[dict]]
+
+    # --- Evidence-first pipeline (v2) ---
+
+    # The user's research question. Send payloads carry only what they list, so the extraction
+    # workers get it through this key; the writer/verifier read it from ``query.topic``.
+    topic: NotRequired[str]
+
+    # One packed batch of sources for a single extraction call each
+    # {"url", "title", "text", "source_type", "credibility_score"}.
+    active_batch: NotRequired[list[dict]]
+
+    # Search query the plan assigned to the sub-question a gap-fill worker handles.
+    search_query: NotRequired[str]
+
+    # Question frame (agents/expansion.py) for Send-fanned nodes that do not receive ``plan``
+    # (the paper scout), and its key constraint for extraction workers (``scope``).
+    frame: NotRequired[QuestionFrame | None]
+    scope: NotRequired[str]
+
+    # Set (to the reviewer's text, possibly "") by graph.rework.request_rework when a reviewer
+    # asks for more research at the HITL pause; None otherwise. While set, dispatch targets the
+    # weakly answered sub-questions; collect_node clears it after that round.
+    rework_instructions: NotRequired[str | None]
+
+    # Finding-id pairs the verifier found in direct conflict; the writer presents both sides.
+    # Overwritten (plain LastValue), written once by verifier_node.
+    fact_conflicts: NotRequired[list[list[str]]]

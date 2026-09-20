@@ -1,26 +1,23 @@
-"""LangGraph node functions — one async function per agent.
+"""LangGraph node functions — one async function per stage.
 
-Phase-4 topology
-================
+Topology (see CLAUDE.md for the diagram)
+========================================
 START → supervisor_node  (LLM: plan creation only)
           ↓ next_agent = "dispatch"
-        document_pass_node  (deterministic: one-time fan-out over ingested_documents)
-          ↓ Send × N (one per document, or per size-bounded slice of an oversized one)
-          │    — bounces straight to dispatch_node when there are no documents
-        document_worker_node  (single-shot full-document claim extraction, no tool loop)
-          ↓ findings merged by _merge_findings reducer
-        dispatch_node  (deterministic: record pre-round IDs, fan out via Send)
-          ↓ Send × N (one per target sub-question — skips ones the document
-          │    pass already answered, via _research_targets' round-0 check)
-        worker_node  (role-aware researcher for a single sub-question)
-          ↓ findings merged by _merge_findings reducer
-        collect_node  (deterministic: stop-signal check + rework bookkeeping)
-          ├─ stop  → critic_node
-          └─ loop  → dispatch_node  (novelty/similarity signal still open)
-        critic_node  (LLM: verdicts, then decides whether to loop back)
-          ├─ weak/refuted findings under the rework cap → dispatch_node
-          │    (re-research just those; see settings.max_rework_attempts)
-          └─ else → fact_checker_node  → writer_node  → END
+        document_pass_node  (deterministic: one-time fan-out)
+          ├─ Send × B  document_worker_node  (uploaded documents packed into batches, one
+          │            extraction call each)
+          └─ Send × 1  paper_scout_node      (search → light-LLM relevance filter)
+          ↓ both converge
+        paper_worker_node  (extraction over the kept abstracts, one call per sub-question)
+          ↓
+        dispatch_node  (deterministic: record pre-round IDs, coverage gate, fan out via Send)
+          ↓ Send × N (one per sub-question that still lacks min_grounded_facts grounded facts)
+        worker_node  (gap fill: search → fetch → one extraction call)
+          ↓ findings merged by the _merge_findings reducer
+        collect_node  (deterministic: stop-signal check)
+          ├─ loop  → dispatch_node  (novelty signal still open)
+          └─ stop  → verifier_node → writer_node → END
 """
 from __future__ import annotations
 
@@ -31,27 +28,17 @@ from typing import Any
 from langchain_core.messages import AIMessage
 from langgraph.types import Send
 
-from research_swarm.agents.base import get_tiered_llm
-from research_swarm.agents.critic import run_critic
-from research_swarm.agents.fact_checker import run_fact_checker
-from research_swarm.agents.researcher import run_researcher  # kept for legacy node + test patching
+from research_swarm.agents._utils import _field, _latest_verdicts
+from research_swarm.agents.base import get_agent_llm, get_tiered_llm, without_thinking
+from research_swarm.agents.question import research_topic
 from research_swarm.agents.supervisor import SupervisorDecision, run_supervisor
-from research_swarm.agents.workers import run_worker
-from research_swarm.agents.writer import run_writer
 from research_swarm.config import settings
 from research_swarm.eval.llm_judge import judge_report
 from research_swarm.runtime.budget import BudgetExceeded, get_budget
+from research_swarm.runtime.limits import set_llm_context
+from research_swarm.runtime.trace import TraceCallback, timed, trace_event, traced_node
+from research_swarm.schemas.critique import CritiqueVerdict
 from research_swarm.schemas.state import AgentState
-from research_swarm.schemas.worker import WorkerRole
-from research_swarm.tools import (
-    arxiv_search,
-    europe_pmc_search,
-    fetch_url,
-    pubmed_search,
-    web_search,
-)
-from research_swarm.tools.retriever_tool import build_retriever_tool
-from research_swarm.tools.web_search import is_configured as _tavily_configured
 
 logger = logging.getLogger(__name__)
 
@@ -60,77 +47,29 @@ logger = logging.getLogger(__name__)
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-def _get_researcher_tools(max_sources: int | None = None, session_id: str | None = None):
-    tools = [arxiv_search, pubmed_search, europe_pmc_search, fetch_url]
-    if _tavily_configured():
-        tools.insert(0, web_search)
-    try:
-        tools.append(build_retriever_tool(max_sources=max_sources, session_id=session_id))
-    except Exception as exc:
-        logger.warning("RAG retriever unavailable: %s", exc)
-    return tools
 
 
-def _finding_evidence_dicts(finding: Any) -> list[dict]:
-    """Return a Finding's evidence as plain dicts, regardless of Source vs dict shape."""
-    evidence = finding.evidence if hasattr(finding, "evidence") else finding.get("evidence", [])
-    out: list[dict] = []
-    for s in evidence:
-        if hasattr(s, "model_dump"):
-            out.append(s.model_dump(mode="json"))
-        elif isinstance(s, dict):
-            out.append(s)
-    return out
 
 
-async def _ingest_round_evidence(state: AgentState, findings: list) -> None:
-    """Persist this round's evidence into the session's RAG index.
+def _stage_of_agent(agent: str) -> str:
+    """The stage a ``_get_tiered_state_llm`` ``agent=`` label belongs to.
 
-    Runs once per round from collect_node -- after all of this round's
-    Send-dispatched worker_node tasks have already merged -- so writes to the
-    session's Chroma collection are always sequential, never concurrent
-    across parallel workers. IngestionPipeline.ingest_new_source_dicts skips
-    URLs already present in the collection, so calling this on every round
-    (not just once) is a cheap no-op for evidence ingested in an earlier
-    round -- it only does real work for genuinely new sources.
-
-    This lets a rework pass (or a later dispatch round) check the
-    accumulated corpus via retrieve_from_rag before re-hitting the web for
-    the same ground a sibling worker already covered in an earlier round.
-
-    Best-effort: failure here (embedding model unavailable, disk issue) must
-    never block the graph's stop/rework routing decision.
+    "worker/general[sub-question]/summarizer" -> "summarizer"; "worker/general[...]" -> "worker";
+    "paper_worker[sub-question]" -> "paper_worker"; "verifier" -> "verifier".
     """
-    all_evidence = [s for f in findings for s in _finding_evidence_dicts(f)]
-    if not all_evidence:
-        return
-    try:
-        from research_swarm.rag.indexes import get_embed_model
-        from research_swarm.rag.ingestion import IngestionPipeline
-
-        session_id = state.get("session_id", "default")
-        pipeline = IngestionPipeline(session_id)
-        embed_model = get_embed_model()
-        added = await asyncio.to_thread(
-            pipeline.ingest_new_source_dicts, all_evidence, embed_model
-        )
-        if added:
-            logger.info(
-                "Collect: persisted %d new evidence chunk(s) into session RAG index.",
-                added,
-            )
-    except Exception as exc:
-        logger.warning("Collect: evidence ingestion failed (%s) -- continuing.", exc)
+    if agent.endswith("/summarizer"):
+        return "summarizer"
+    return agent.split("[", 1)[0].split("/", 1)[0]
 
 
-def _get_tiered_state_llm(state: AgentState, tier: str, pool: str = "research"):
+def _get_tiered_state_llm(state: AgentState, tier: str, pool: str = "research", agent: str = ""):
     """Create a tiered LLM with budget callback attached.
 
     ``pool`` selects which of the session's two independent budget counters
     this call draws from -- "research" (supervisor, document workers,
     dispatch/worker loop -- the part that can genuinely iterate) or "review"
-    (critic/fact-checker/writer/judge -- a few batched calls). Kept separate
-    so a research-loop overrun can't exhaust the budget critic/fact-checker/
+    (verifier/writer/judge -- a few batched calls). Kept separate
+    so a research-loop overrun can't exhaust the budget the verifier/
     writer need to turn already-gathered findings into a real report. See
     runtime/budget.py.
 
@@ -149,12 +88,37 @@ def _get_tiered_state_llm(state: AgentState, tier: str, pool: str = "research"):
     dropping the callback (and with it, all budget call/token counting).
     Setting the field directly on the model instance survives that because
     with_structured_output/bind_tools operate on `self` itself, not a wrapper.
+
+    Stages listed in ``settings.no_thinking_stages`` (structured-JSON producers) run with thinking
+    off and a capped output; see the setting for why.
+
+    A stage listed in ``settings.large_model_stages`` (by its agent label, e.g. "supervisor",
+    "writer", "paper_scout", "paper_worker", "verifier", "gap_fill") gets ``settings.large_model``
+    on its own endpoint instead (by default Ollama Cloud directly, while the rest stays on the
+    local daemon) -- so moving a stage is a config change, not a code change.
     """
     session_id = state.get("session_id", "default")
     budget = get_budget(session_id, pool=pool)
-    provider_override = state.get("model_provider") if tier == "standard" else None
-    llm = get_tiered_llm(tier=tier, provider_override=provider_override)
-    return llm.model_copy(update={"callbacks": [budget.callback]})
+    stage = _stage_of_agent(agent or tier)
+    if settings.large_model and stage in settings.large_model_stages:
+        provider = settings.large_model_provider
+        base_url = settings.large_model_ollama_base_url if provider == "ollama" else ""
+        llm = get_agent_llm(provider=provider, model=settings.large_model, temperature=0.0,
+                            base_url=base_url or None)
+        # A direct Ollama Cloud endpoint gets its own concurrency pool (limits.llm_slot).
+        set_llm_context("ollama_cloud" if base_url else provider, session_id)
+    else:
+        provider_override = state.get("model_provider") if tier == "standard" else None
+        llm = get_tiered_llm(tier=tier, provider_override=provider_override)
+        # Which provider's concurrency cap (runtime/limits.py::llm_slot) this task's calls use.
+        provider = provider_override or getattr(
+            settings, f"tier_{tier}_provider", settings.default_model_provider,
+        )
+        set_llm_context(provider, session_id)
+    if stage in settings.no_thinking_stages:
+        llm = without_thinking(llm, settings.no_thinking_max_tokens)
+    callbacks = [budget.callback, TraceCallback(session_id, agent or tier, tier)]
+    return llm.model_copy(update={"callbacks": callbacks})
 
 
 def _check_budget(
@@ -179,14 +143,44 @@ def _check_budget(
         }
 
 
-def _research_targets(state: AgentState) -> list[str]:
-    """Return the sub-questions needing (re-)research this round.
+def _scope(plan: Any) -> str:
+    """The plan's question-frame key constraint ("" without one)."""
+    frame = getattr(plan, "frame", None) if plan else None
+    return frame.key_constraint if frame is not None and frame.has_constraint else ""
 
-    Round 0: every sub-question in the plan.  Later rounds: only sub-questions
-    whose latest finding is weak or refuted, AND haven't already hit the
-    per-finding rework cap (``settings.max_rework_attempts`` — see
-    ``rework_counts`` in AgentState). Shared by dispatch_node, route_from_dispatch,
-    critic_node, and collect_node so all four views of a round agree exactly.
+
+def _counts_as_coverage(finding: Any, frame: Any) -> tuple[bool, str]:
+    """(counts?, reason) for the round-0 coverage gate.
+
+    A finding covers its sub-question only when its evidence was located, the extractor did not
+    label it background, and -- when the question has a key constraint -- its claim or evidence
+    actually talks about that constraint. The lexical check is a second opinion on purpose: a
+    lenient small model labels everything "direct" (the KV-cache run had 14 compression facts
+    "covering" a cross-model question, so gap fill never ran). A false miss costs one gap-fill
+    call.
+    """
+    from research_swarm.agents.expansion import scope_hit
+
+    if _field(finding, "grounding", "unknown") == "none":
+        return False, "ungrounded"
+    if _field(finding, "relevance", "unknown") in ("background", "off_topic"):
+        return False, "background"
+    evidence = _field(finding, "evidence", []) or []
+    text = _field(finding, "claim", "") + " " + (
+        _field(evidence[0], "snippet", "") if evidence else ""
+    )
+    if not scope_hit(text, frame):
+        return False, "scope_miss"
+    return True, "direct"
+
+
+def _research_targets(state: AgentState, trace: bool = False) -> list[str]:
+    """Return the sub-questions that still need research this round.
+
+    Round 0: every sub-question with fewer than ``settings.min_grounded_facts`` findings that
+    count as coverage (``_counts_as_coverage``: grounded, not background, within the question
+    frame's scope). Later rounds: sub-questions with no finding at all (a worker that failed).
+    Shared by dispatch_node and route_from_dispatch so both agree.
     """
     plan = state.get("plan")
     if not plan:
@@ -194,69 +188,53 @@ def _research_targets(state: AgentState) -> list[str]:
 
     findings = state.get("findings") or []
 
+    if state.get("rework_instructions") is not None:
+        return _rework_targets(state, trace=trace)
+
     if state.get("research_rounds", 0) == 0:
-        # Round 0 used to unconditionally return every sub-question, which
-        # was safe only because nothing ran before dispatch. document_pass_node
-        # can now produce findings before round 0 (one-time full-document
-        # extraction from ingested documents) -- skip any sub-question that
-        # already has one of those, so round-0 web dispatch doesn't duplicate
-        # work a document already did. No weak/refuted distinction here:
-        # critiques is empty at genuine round 0, so any existing finding can
-        # only have come from the document pass, not a rejected re-research.
-        already_has_finding = {
-            (f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", ""))
-            .strip().lower()
-            for f in findings
-        }
-        return [sq for sq in plan.sub_questions if sq.strip().lower() not in already_has_finding]
+        frame = getattr(plan, "frame", None)
+        covered: dict[str, int] = {}
+        reasons: dict[str, dict[str, int]] = {}
+        for f in findings:
+            key = _field(f, "sub_question", "").strip().lower()
+            ok, why = _counts_as_coverage(f, frame)
+            bucket = reasons.setdefault(key, {})
+            bucket[why] = bucket.get(why, 0) + 1
+            if ok:
+                covered[key] = covered.get(key, 0) + 1
+        need = max(1, settings.min_grounded_facts)
+        targets = [sq for sq in plan.sub_questions if covered.get(sq.strip().lower(), 0) < need]
+        for sq in targets if trace else []:
+            got = reasons.get(sq.strip().lower(), {})
+            if got.get("background") or got.get("scope_miss"):
+                trace_event(state.get("session_id"), "coverage.scope_miss", "note",
+                            sub_question=sq[:80], **got)
+        return targets
 
-    weak_or_refuted_sqs = _weak_or_refuted_sub_questions(state)
-    rework_counts = state.get("rework_counts") or {}
-    max_rework = settings.max_rework_attempts
-
-    answered_sqs: set[str] = set()
-    capped_sqs: set[str] = set()
-    for f in findings:
-        sq = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
-        norm_sq = sq.strip().lower()
-        if norm_sq not in weak_or_refuted_sqs:
-            answered_sqs.add(norm_sq)
-        elif rework_counts.get(norm_sq, 0) >= max_rework:
-            capped_sqs.add(norm_sq)
-
-    return [
-        sq for sq in plan.sub_questions
-        if sq.strip().lower() not in answered_sqs
-        and sq.strip().lower() not in capped_sqs
-    ]
+    answered = {_field(f, "sub_question", "").strip().lower() for f in findings}
+    return [sq for sq in plan.sub_questions if sq.strip().lower() not in answered]
 
 
-def _weak_or_refuted_sub_questions(state: AgentState) -> set[str]:
-    """Return normalized sub-questions whose latest finding was critiqued as weak or refuted.
-
-    Distinct from "has no finding at all": a sub-question that never got a
-    finding (a worker failure, or the mandatory round-0->round-1 loop that
-    always fires before critic ever runs -- see should_stop's "first round"
-    fallback) hasn't been rejected by anything, it just hasn't succeeded yet.
-    collect_node uses this set (not _research_targets' full return value,
-    which also includes findingless sub-questions) to increment
-    rework_counts, so a sub-question's max_rework_attempts budget isn't
-    partially spent by rounds that happened before any critique existed.
-    """
-    from research_swarm.agents._utils import _latest_verdicts
-
-    findings = state.get("findings") or []
-    critiques = state.get("critiques") or []
-    latest_verdicts = _latest_verdicts(critiques)
-    weak_or_refuted_ids = {fid for fid, v in latest_verdicts.items() if v in {"weak", "refuted"}}
-
-    result: set[str] = set()
-    for f in findings:
-        fid = f.id if hasattr(f, "id") else f.get("id", "")
-        if fid in weak_or_refuted_ids:
-            sq = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
-            result.add(sq.strip().lower())
-    return result
+def _rework_targets(state: AgentState, trace: bool = False) -> list[str]:
+    """Sub-questions to research again when a reviewer asks for more (graph/rework.py): those
+    without a finding the verifier supported and judged on-topic. If every sub-question has one,
+    all of them -- the reviewer explicitly asked for more research, so doing nothing is wrong."""
+    plan = state.get("plan")
+    if not plan:
+        return []
+    verdicts = _latest_verdicts(state.get("critiques") or [])
+    answered: set[str] = set()
+    for f in state.get("findings") or []:
+        if (verdicts.get(_field(f, "id", "")) == CritiqueVerdict.supported.value
+                and _field(f, "relevance", "unknown") not in ("background", "off_topic")):
+            answered.add(_field(f, "sub_question", "").strip().lower())
+    weak = [sq for sq in plan.sub_questions if sq.strip().lower() not in answered]
+    targets = weak or list(plan.sub_questions)
+    if trace:
+        trace_event(state.get("session_id"), "rework.targets", "note", targets=targets,
+                    all_answered=not weak,
+                    instructions=(state.get("rework_instructions") or "")[:200])
+    return targets
 
 
 def _depth_str(state: AgentState) -> str:
@@ -296,9 +274,9 @@ def _dispatch_bounce_payload(state: AgentState) -> dict[str, Any]:
 
     Send() gives the receiving node ONLY this payload, not the full graph
     state -- dispatch_node (and _research_targets, which it calls) needs
-    plan, findings, critiques, research_rounds, and rework_counts to make
-    its routing decision. Mirrors _collect_bounce_payload, which exists for
-    the identical reason on the dispatch->collect side.
+    plan, findings, critiques and research_rounds to make its routing decision. Mirrors
+    _collect_bounce_payload, which exists for the identical reason on the dispatch->collect
+    side.
     """
     return {
         "session_id":      state.get("session_id", "default"),
@@ -307,7 +285,6 @@ def _dispatch_bounce_payload(state: AgentState) -> dict[str, Any]:
         "findings":        state.get("findings") or [],
         "critiques":       state.get("critiques") or [],
         "research_rounds": state.get("research_rounds", 0),
-        "rework_counts":   state.get("rework_counts") or {},
         "human_feedback":  state.get("human_feedback"),
         "model_provider":  state.get("model_provider"),
         "model_name":      state.get("model_name"),
@@ -319,16 +296,13 @@ def route_from_document_pass(state: AgentState):
 
     Two independent kinds of Sends, mixed in one list (LangGraph supports a
     single conditional edge fanning out to different target nodes):
-      - document_worker_node — one per (document, part), same as before.
-      - fetch_worker_node — one per plan sub-question, deep-fetching and
-        embedding search results into the session's RAG index BEFORE round-0
-        dispatch, so retrieve_from_rag has real substance from round 1
-        instead of only what workers' own live searches turn up mid-round.
+      - document_worker_node — one per packed batch of documents.
+      - paper_scout_node — builds the relevance-filtered paper corpus for the
+        plan's sub-questions BEFORE round-0 dispatch.
 
     "Has docs" and "has plan" are independent gates: a plan with no uploaded
-    documents still gets the fetch pass (nothing to extract, but still
-    something to search-and-embed). Only a missing plan bounces straight to
-    dispatch_node, same as always.
+    documents still gets the paper scout. Only a missing plan bounces
+    straight to dispatch_node, same as always.
     """
     docs = state.get("ingested_documents") or []
     plan = state.get("plan")
@@ -342,30 +316,52 @@ def route_from_document_pass(state: AgentState):
     sub_questions  = list(plan.sub_questions)
 
     sends = []
+    query = state.get("query")
+    topic = research_topic(query)
 
     if docs:
-        from research_swarm.agents.document_worker import _split_into_parts
+        # Short documents share extraction calls: one call per ~extract_batch_chars of text
+        # rather than one per document.
+        from research_swarm.agents.extractor import pack_sources
 
-        for doc in docs:
-            parts = _split_into_parts(doc.get("text", ""))
-            for i, part_text in enumerate(parts):
-                sends.append(Send("document_worker_node", {
-                    "active_document":        doc,
-                    "active_doc_part_text":   part_text,
-                    "active_doc_part_index":  i,
-                    "active_doc_part_total":  len(parts),
-                    "sub_questions_snapshot": sub_questions,
-                    "session_id":             session_id,
-                    "model_provider":         model_provider,
-                    "model_name":             model_name,
-                }))
+        sources = [
+            {"url": d.get("url", ""), "title": d.get("title", ""), "text": d.get("text", ""),
+             "source_type": d.get("source_type", "pdf"),
+             "credibility_score": d.get("credibility_score", 0.8)}
+            for d in docs
+        ]
+        for batch in pack_sources(sources, settings.extract_batch_chars):
+            sends.append(Send("document_worker_node", {
+                "active_batch":           batch,
+                "topic":                  topic,
+                "scope":                  _scope(plan),
+                "sub_questions_snapshot": sub_questions,
+                "session_id":             session_id,
+                "model_provider":         model_provider,
+                "model_name":             model_name,
+            }))
 
     if settings.enable_fetch_pass:
+        from research_swarm.agents.papers import keyword_query
+
+        tasks = []
         for sq in sub_questions:
-            sends.append(Send("fetch_worker_node", {
-                "active_fetch_query": sq,
-                "session_id":         session_id,
-            }))
+            assignment = plan.assignment_for(sq)
+            planned = assignment.search_query.strip() if assignment else ""
+            search_query = planned or keyword_query(sq)
+            tasks.append({
+                "sub_question": sq,
+                "search_query": search_query,
+                "domain":       assignment.domain if assignment else "other",
+            })
+        sends.append(Send("paper_scout_node", {
+            "scout_tasks":    tasks,
+            "frame":          plan.frame,
+            "session_id":     session_id,
+            "query":          state.get("query"),
+            "model_provider": model_provider,
+            "model_name":     model_name,
+        }))
 
     return sends or [Send("dispatch_node", _dispatch_bounce_payload(state))]
 
@@ -374,238 +370,257 @@ def route_from_document_pass(state: AgentState):
 # document_worker_node  (single-shot full-document extraction)
 # ---------------------------------------------------------------------------
 
+@traced_node("document_worker")
 async def document_worker_node(state: AgentState) -> dict[str, Any]:
-    """Extract claims from a single document (or one slice of an oversized one)."""
+    """Extract facts from one packed batch of documents (agents/extractor.py)."""
     if (early := _check_budget(state, "DocumentWorker")):
         return early
 
-    document  = state.get("active_document")
-    part_text = state.get("active_doc_part_text")
-    if not document or not part_text:
-        return {"messages": [AIMessage(content="[DocumentWorker] No document assigned; skipping.")]}
+    batch = state.get("active_batch")
+    if not batch:
+        return {"messages": [AIMessage(content="[DocumentWorker] No documents; skipping.")]}
+
+    from research_swarm.agents.extractor import extract_facts
+    from research_swarm.runtime.limits import limiter
 
     sub_questions = state.get("sub_questions_snapshot") or []
-    part_index    = state.get("active_doc_part_index", 0)
-    part_total    = state.get("active_doc_part_total", 1)
-
-    llm = _get_tiered_state_llm(state, "standard")
-
-    from research_swarm.agents.document_worker import run_document_worker
-    findings = await run_document_worker(
-        document, part_index, part_total, part_text, sub_questions, llm,
-    )
-
-    label = document.get("title") or document.get("url", "doc")
-    part_note = f" (part {part_index + 1}/{part_total})" if part_total > 1 else ""
+    session_id = state.get("session_id", "default")
+    llm = _get_tiered_state_llm(state, "standard", agent="document_worker")
+    # LangGraph starts every Send-fanned worker at once; cap how many call the LLM together.
+    async with limiter("document_worker", session_id, settings.document_worker_concurrency):
+        findings = await extract_facts(
+            state.get("topic", ""), sub_questions, batch, llm,
+            session_id=session_id, agent="document_worker", scope=state.get("scope", ""),
+        )
     return {
         "findings": findings,
-        "messages": [
-            AIMessage(content=f"[DocumentWorker] {label}{part_note}: {len(findings)} finding(s).")
-        ],
+        "messages": [AIMessage(content=(
+            f"[DocumentWorker] {len(batch)} source(s): {len(findings)} finding(s)."
+        ))],
     }
 
 
 # ---------------------------------------------------------------------------
-# fetch_worker_node  (one-time deep-fetch-and-embed pass, no LLM call)
+# paper_scout_node / paper_worker_node  (relevance-filtered abstract corpus)
 # ---------------------------------------------------------------------------
 
-async def fetch_worker_node(state: AgentState) -> dict[str, Any]:
-    """Search once per sub-question and deep-embed results into the session's
-    RAG index, before any research round runs.
+@traced_node("paper_scout")
+async def paper_scout_node(state: AgentState) -> dict[str, Any]:
+    """Build the relevance-filtered paper corpus for ALL sub-questions at once.
 
-    Deliberately makes NO LLM call -- pure deterministic tool calls plus
-    embedding work, so it never touches the LLM call/token budget. Reuses
-    the exact search tools (pubmed_search/arxiv_search/europe_pmc_search/
-    web_search) and the exact multi-chunk embedding path
-    (IngestionPipeline.ingest_pdf/ingest_url/ingest_text) already proven for
-    the uploaded-document path -- see rag/ingestion.py. Each source's
-    fetch+embed is independently try/excepted so one bad download (a dead
-    link, a malformed PDF) can't drop the others fanned out from the same
-    Send.
+    Per sub-question: one supervisor-written keyword query per domain-routed
+    tool, searched concurrently across every sub-question; each sub-question's
+    deduplicated candidate pool is then scored against that sub-question in its
+    own light-LLM call (calls run concurrently) and kept where
+    >= settings.relevance_threshold. A sub-question that keeps nothing gets one
+    retry on the tools its domain routing skipped. No PDF downloads, no
+    embeddings; survivors are appended to ``paper_corpus`` for
+    paper_worker_node.
     """
-    query = state.get("active_fetch_query")
-    if not query:
-        return {"messages": [AIMessage(content="[FetchPass] No query assigned; skipping.")]}
+    tasks = state.get("scout_tasks") or []
+    if not tasks:
+        return {"messages": [AIMessage(content="[PaperScout] No sub-questions; skipping.")]}
+    if (early := _check_budget(state, "PaperScout")):
+        return early
+
+    from research_swarm.agents.papers import (
+        choose_papers,
+        interleave,
+        prefilter_candidates,
+        routed_tools_union,
+        score_pool,
+        search_task,
+        tool_registry,
+    )
 
     session_id = state.get("session_id", "default")
-    max_results = settings.fetch_pass_results_per_tool
+    query = state.get("query")
+    topic = research_topic(query) or tasks[0]["sub_question"]
+    llm = _get_tiered_state_llm(state, "fast", agent="paper_scout")
 
-    import os
-    import tempfile
-    import xml.etree.ElementTree as ET
+    available = tool_registry()
+    per_tool = settings.fetch_pass_results_per_tool
+    cap = settings.paper_max_candidates
+    threshold = settings.relevance_threshold
+    limit = settings.paper_max_per_sub_question
+    # The LLM's domain label picks the tools first; keywords in the sub-question/query widen the
+    # set so a wrong label cannot keep a health question off PubMed.
+    routed = [
+        routed_tools_union(t["domain"], f"{t['sub_question']} {t['search_query']}", available)
+        for t in tasks
+    ]
 
-    import httpx
+    # The question frame's whole-question queries (which carry its key constraint) are searched
+    # once and, with the probe's hits for the literal question, shared by every sub-question's
+    # pool as extra round-robin lists -- so constraint-bearing papers get a fair share of the
+    # candidate budget even when a sub-question's own query is generic.
+    frame = state.get("frame")
+    frame_queries = list(frame.search_queries) if frame else []
+    frame_tools = routed_tools_union(
+        tasks[0]["domain"], f"{topic} {' '.join(frame_queries)}", available,
+    )
 
-    from research_swarm.rag.indexes import get_embed_model
-    from research_swarm.rag.ingestion import IngestionPipeline
-
-    pipeline = IngestionPipeline(session_id)
-    embed_model = get_embed_model()
-    embedded = 0
-
-    # PubMed: ingest the abstract as-is -- already close to that source
-    # type's practical ceiling. Real PubMed full text needs a separate
-    # PMID -> PMCID -> PMC-efetch chain this pass doesn't build.
-    try:
-        pubmed_results = await asyncio.to_thread(
-            pubmed_search.invoke, {"query": query, "max_results": max_results}
+    with timed(session_id, "paper_scout", "step", name="search", n_tasks=len(tasks)) as info:
+        per_task, per_frame_query = await asyncio.gather(
+            asyncio.gather(*(
+                search_task(t["sub_question"], t["search_query"], routed[j], available,
+                            per_tool, session_id)
+                for j, t in enumerate(tasks)
+            )),
+            asyncio.gather(*(
+                search_task(topic, q, frame_tools, available, per_tool, session_id)
+                for q in frame_queries
+            )),
         )
-        for source in pubmed_results:
-            try:
-                embedded += await asyncio.to_thread(
-                    pipeline.ingest_source_dict, source, embed_model
-                )
-            except Exception as exc:
-                logger.warning("FetchPass: PubMed source ingest failed (%s) -- skipping.", exc)
-    except Exception as exc:
-        logger.warning("FetchPass: pubmed_search failed for %r (%s) -- skipping.", query[:60], exc)
+        shared: dict[str, list[dict]] = {}
+        for i, ranked in enumerate(per_frame_query):
+            for tool, items in ranked.items():
+                shared[f"frame{i}:{tool}"] = items
+        if frame and frame.probe_hits:
+            shared["probe"] = list(frame.probe_hits)
+        # A wide net from the (cheap) searches, narrowed in code to the `cap` the LLM scorer
+        # reads -- more candidates considered at no extra LLM cost.
+        wide = [interleave({**ranked, **shared}, max(cap, settings.paper_prefilter_pool))
+                for ranked in per_task]
+        pools = [
+            prefilter_candidates(w, t["sub_question"], t["search_query"], frame, cap)
+            for w, t in zip(wide, tasks)
+        ]
+        info["n_searched"] = sum(len(w) for w in wide)
+        info["n_candidates"] = sum(len(p) for p in pools)
+        info["n_frame_queries"] = len(frame_queries)
 
-    # Europe PMC: overlaps with PubMed (both draw on MEDLINE) but additionally
-    # exposes open-access full text -- europe_pmc_tool.py encodes that as a
-    # "/article/PMC/{pmcid}" URL. Same two-tier pattern as arXiv below: try
-    # the deep fetch, fall back to the abstract (already carried in the
-    # Source dict) if it's not open access or the fetch fails.
-    try:
-        epmc_results = await asyncio.to_thread(
-            europe_pmc_search.invoke, {"query": query, "max_results": max_results}
-        )
-        for source in epmc_results:
-            url = source.get("url", "")
-            pmcid = url.rsplit("/", 1)[-1] if "/article/PMC/" in url else None
-            if not pmcid:
-                # Not open access (or no PMCID) -- abstract is the ceiling.
-                try:
-                    embedded += await asyncio.to_thread(
-                        pipeline.ingest_source_dict, source, embed_model
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "FetchPass: Europe PMC source ingest failed (%s) -- skipping.", exc
-                    )
-                continue
-            try:
-                resp = await asyncio.to_thread(
-                    httpx.get,
-                    f"https://www.ebi.ac.uk/europepmc/webservices/rest/{pmcid}/fullTextXML",
-                    timeout=20,
-                )
-                resp.raise_for_status()
-                root = ET.fromstring(resp.content)
-                body = root.find(".//body")
-                if body is None:
-                    raise ValueError("no <body> in full-text XML")
-                text = " ".join(
-                    "".join(p.itertext()).strip() for p in body.iter("p")
-                ).strip()
-                if not text:
-                    raise ValueError("full-text XML body had no paragraph text")
-                metadata = {
-                    "url": url,
-                    "title": source.get("title", ""),
-                    "source_type": "europe_pmc",
-                    "credibility_score": source.get("credibility_score", 0.9),
-                }
-                embedded += await asyncio.to_thread(
-                    pipeline.ingest_text, text, metadata, embed_model
-                )
-            except Exception as exc:
-                # Full-text fetch/parse failed -- fall back to the abstract
-                # rather than losing this source entirely, same as arXiv.
-                logger.warning(
-                    "FetchPass: Europe PMC full text failed for %r (%s) -- "
-                    "falling back to abstract.", url, exc
-                )
-                try:
-                    embedded += await asyncio.to_thread(
-                        pipeline.ingest_source_dict, source, embed_model
-                    )
-                except Exception as fallback_exc:
-                    logger.warning(
-                        "FetchPass: Europe PMC abstract fallback also failed for %r (%s) "
-                        "-- skipping.", url, fallback_exc,
-                    )
-    except Exception as exc:
-        logger.warning(
-            "FetchPass: europe_pmc_search failed for %r (%s) -- skipping.", query[:60], exc
-        )
+    async def _score_and_keep(j: int, pool: list[dict]) -> tuple[dict[int, float], list[dict]]:
+        scores = await score_pool(topic, tasks[j]["sub_question"], pool, llm, frame=frame)
+        return scores, choose_papers(pool, scores)
 
-    # arXiv: download the actual PDF and embed every page via
-    # IngestionPipeline.ingest_pdf's existing multi-page chunker -- the same
-    # one already proven for uploaded PDFs -- instead of just the abstract.
-    # Falls back to the abstract if the PDF isn't fetchable (404, withdrawn,
-    # network error) so a bad download never means zero content for that paper.
-    try:
-        arxiv_results = await asyncio.to_thread(
-            arxiv_search.invoke, {"query": query, "max_results": max_results}
-        )
-        for source in arxiv_results:
-            url = source.get("url", "")
-            if not url.startswith("http"):
-                continue  # error sentinel, e.g. "arxiv://search/..."
-            pdf_url = url.replace("/abs/", "/pdf/")
-            tmp_path = None
-            try:
-                resp = await asyncio.to_thread(
-                    httpx.get, pdf_url, timeout=20, follow_redirects=True
-                )
-                resp.raise_for_status()
-                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                    tmp.write(resp.content)
-                    tmp_path = tmp.name
-                embedded += await asyncio.to_thread(pipeline.ingest_pdf, tmp_path, embed_model)
-            except Exception as exc:
-                # PDF unavailable (404, withdrawn, network error, etc.) -- fall
-                # back to the abstract rather than losing this source entirely.
-                # Same graceful-degradation level PubMed already gets.
-                logger.warning(
-                    "FetchPass: arXiv PDF ingest failed for %r (%s) -- "
-                    "falling back to abstract.", url, exc
-                )
-                try:
-                    embedded += await asyncio.to_thread(
-                        pipeline.ingest_source_dict, source, embed_model
-                    )
-                except Exception as fallback_exc:
-                    logger.warning(
-                        "FetchPass: arXiv abstract fallback also failed for %r (%s) -- skipping.",
-                        url, fallback_exc,
-                    )
-            finally:
-                if tmp_path:
-                    os.unlink(tmp_path)
-    except Exception as exc:
-        logger.warning("FetchPass: arxiv_search failed for %r (%s) -- skipping.", query[:60], exc)
+    results = await asyncio.gather(*(_score_and_keep(j, p) for j, p in enumerate(pools)))
+    all_scores = [r[0] for r in results]
+    kept_by_task = [r[1] for r in results]
 
-    # Web: full page text (up to fetch_url's own ceiling), not just Tavily's
-    # search-engine extract. Skipped entirely when no Tavily key is
-    # configured -- calling it anyway would just embed a useless
-    # "[Search error: ...]" placeholder for every sub-question.
-    if not _tavily_configured():
-        logger.info("FetchPass: Tavily not configured -- skipping web search.")
-    else:
-        try:
-            web_results = await asyncio.to_thread(
-                web_search.invoke, {"query": query, "max_results": max_results}
-            )
-            for source in web_results:
-                url = source.get("url", "")
-                if not url:
+    # Safety net for a misclassified domain: retry once on the skipped tools when NO non-web
+    # paper survived (web results alone are not evidence for a scholarly question). Not "fewer
+    # than a few": that fires for nearly every industry/policy sub-question and doubles the
+    # scout's scoring calls.
+    retry = [
+        (j, [n for n in available if n not in routed[j]])
+        for j, kept in enumerate(kept_by_task)
+        if not any(p.get("source_type") != "web" for p in kept)
+    ]
+    retry = [(j, names) for j, names in retry if names]
+    if retry:
+        with timed(session_id, "paper_scout", "step", name="retry_skipped_tools",
+                   n_tasks=len(retry)):
+            retried = await asyncio.gather(*(
+                search_task(tasks[j]["sub_question"], tasks[j]["search_query"], names,
+                            available, per_tool, session_id)
+                for j, names in retry
+            ))
+            for (j, _), ranked in zip(retry, retried):
+                have = {p["url"].strip().lower() for p in pools[j]}
+                fresh = [p for p in interleave(ranked, cap) if p["url"].strip().lower() not in have]
+                if not fresh:
                     continue
-                try:
-                    embedded += await asyncio.to_thread(
-                        pipeline.ingest_url, url, embed_model, 20000
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "FetchPass: web page ingest failed for %r (%s) -- skipping.", url, exc
-                    )
-        except Exception as exc:
-            logger.warning("FetchPass: web_search failed for %r (%s) -- skipping.", query[:60], exc)
+                fresh_scores = await score_pool(topic, tasks[j]["sub_question"], fresh, llm,
+                                                frame=frame)
+                merged = kept_by_task[j] + choose_papers(fresh, fresh_scores)
+                kept_by_task[j] = sorted(merged, key=lambda p: -p["score"])[:limit]
+                pools[j] = pools[j] + fresh
 
+    corpus: list[dict] = []
+    for j, task in enumerate(tasks):
+        by_type: dict[str, int] = {}
+        for paper in kept_by_task[j]:
+            kind = str(paper.get("source_type"))
+            by_type[kind] = by_type.get(kind, 0) + 1
+            corpus.append({
+                "sub_question": task["sub_question"], "url": paper["url"],
+                "title": paper.get("title", ""), "snippet": paper.get("snippet", ""),
+                "source_type": paper.get("source_type", "web"),
+                "credibility_score": paper.get("credibility_score", 0.6), "score": paper["score"],
+            })
+        hist: dict[int, int] = {}
+        for v in all_scores[j].values():
+            hist[int(round(v * 10))] = hist.get(int(round(v * 10)), 0) + 1
+        # The final state keeps only the kept papers; the full candidate pool is recorded here so
+        # a benchmark can measure candidate-pool recall separately from the relevance filter.
+        trace_event(
+            session_id, "paper_scout.candidates", "note",
+            sub_question=task["sub_question"][:60],
+            candidates=[[p["url"], p.get("title", ""), p.get("source_type")] for p in pools[j]],
+        )
+        trace_event(
+            session_id, "paper_scout.kept", "note", sub_question=task["sub_question"][:60],
+            domain=task["domain"], query=task["search_query"], tools=routed[j],
+            n_candidates=len(pools[j]), n_scored=len(all_scores[j]),
+            n_kept=len(kept_by_task[j]), kept_by_source=by_type, score_histogram=hist,
+            n_topped_up=sum(1 for p in kept_by_task[j] if p.get("topped_up")),
+            threshold=threshold,
+        )
     return {
-        "messages": [
-            AIMessage(content=f"[FetchPass] {embedded} chunk(s) embedded for: {query[:60]}")
-        ],
+        "paper_corpus": corpus,
+        "messages": [AIMessage(content=(
+            f"[PaperScout] {len(corpus)} paper(s) kept across {len(tasks)} sub-question(s) "
+            f"(threshold {threshold:.2f})."
+        ))],
+    }
+
+
+@traced_node("paper_worker")
+async def paper_worker_node(state: AgentState) -> dict[str, Any]:
+    """Turn the relevance-filtered corpus into findings: 1-2 per paper.
+
+    Runs once after every scout/document/fetch worker has finished (they all
+    feed this node, which feeds dispatch_node). One extraction call per
+    sub-question, run concurrently. Sub-questions with no paper above the
+    threshold produce nothing here and fall through to dispatch's normal
+    web-research worker.
+    """
+    corpus = state.get("paper_corpus") or []
+    plan = state.get("plan")
+    if not corpus or not plan:
+        return {"messages": [AIMessage(content="[PaperWorker] No papers in corpus; skipping.")]}
+    if (early := _check_budget(state, "PaperWorker")):
+        return early
+
+    session_id = state.get("session_id", "default")
+    query = state.get("query")
+    topic = research_topic(query)
+
+    # Full text of the best primary papers, cut to the relevant passages (agents/deep_read.py):
+    # extraction then quotes the original paper instead of leaving the details to blogs.
+    from research_swarm.agents.deep_read import deep_read
+
+    with timed(session_id, "paper_worker", "step", name="deep_read"):
+        corpus = await deep_read(corpus, topic, getattr(plan, "frame", None), session_id)
+
+    from research_swarm.agents.papers import extract_findings
+
+    by_sq: dict[str, list[dict]] = {}
+    for paper in corpus:
+        by_sq.setdefault(paper["sub_question"], []).append(paper)
+
+    sem = asyncio.Semaphore(2)
+
+    async def _one(sq: str, papers: list[dict]) -> list:
+        async with sem:
+            llm = _get_tiered_state_llm(state, "standard", agent=f"paper_worker[{sq[:32]}]")
+            return await extract_findings(topic, sq, papers, llm, session_id=session_id,
+                                          scope=_scope(plan))
+
+    results = await asyncio.gather(*(_one(sq, ps) for sq, ps in by_sq.items()))
+    findings = [f for r in results for f in r]
+    for f in findings:
+        trace_event(
+            session_id, "paper_worker.finding", "note", sub_question=f.sub_question,
+            confidence=f.confidence, text=f.claim, evidence_urls=[e.url for e in f.evidence],
+        )
+    return {
+        "findings": findings,
+        "messages": [AIMessage(content=(
+            f"[PaperWorker] {len(findings)} finding(s) from {len(corpus)} paper(s) "
+            f"across {len(by_sq)} sub-question(s)."
+        ))],
     }
 
 
@@ -613,6 +628,7 @@ async def fetch_worker_node(state: AgentState) -> dict[str, Any]:
 # supervisor_node  (called ONCE — plan creation only)
 # ---------------------------------------------------------------------------
 
+@traced_node("supervisor")
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
     """Create the initial research plan via LLM, then route to dispatch."""
     # Fast-path: if a plan already exists we should never be here again.
@@ -627,10 +643,10 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     if (early := _check_budget(state, "Supervisor")):
         return early
 
-    # Supervisor is the orchestrator — called once per session, so the larger
-    # model's cost doesn't compound the way it would for the per-sub-question
-    # worker calls. Use the thorough tier for plan-quality reasoning.
-    llm = _get_tiered_state_llm(state, "thorough")
+    # Supervisor is the orchestrator — called once per session (query expansion + plan), so the
+    # larger model's cost doesn't compound the way it would for the per-sub-question worker
+    # calls. The large model when "supervisor" is in settings.large_model_stages (the default).
+    llm = _get_tiered_state_llm(state, "thorough", agent="supervisor")
     decision = await run_supervisor(state, llm)
 
     # Enforce dispatch routing regardless of LLM output
@@ -641,6 +657,11 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
             plan=decision.plan,
         )
 
+    trace_event(
+        state.get("session_id", "default"), "supervisor.plan", "note",
+        reasoning=decision.reasoning,
+        text=decision.plan.model_dump_json() if decision.plan else "(no plan)",
+    )
     logger.info("Supervisor created plan with %d sub-question(s).",
                 len(decision.plan.sub_questions) if decision.plan else 0)
 
@@ -658,6 +679,7 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
 # dispatch_node  (deterministic fan-out)
 # ---------------------------------------------------------------------------
 
+@traced_node("dispatch")
 async def dispatch_node(state: AgentState) -> dict[str, Any]:
     """Record pre-round finding IDs and set up the next research round.
 
@@ -677,7 +699,7 @@ async def dispatch_node(state: AgentState) -> dict[str, Any]:
 
     finding_ids = {f.id if hasattr(f, "id") else f.get("id", "") for f in findings}
     research_rounds = state.get("research_rounds", 0)
-    targets = _research_targets(state)
+    targets = _research_targets(state, trace=True)
     if research_rounds > 0 and not targets:
         # Nothing left to re-research — let collect handle the transition
         logger.info("Dispatch: all sub-questions answered; signalling collect.")
@@ -705,7 +727,7 @@ def _collect_bounce_payload(state: AgentState) -> dict[str, Any]:
 
     Send() gives the receiving node ONLY the payload dict, not the full graph
     state -- collect_node needs research_rounds, pre_dispatch_finding_ids,
-    findings, critiques, and rework_counts to make its stop/rework decision.
+    findings and critiques to make its stop decision.
     Omitting any of these makes every field silently reset to its default
     (0 / [] / {}) on that invocation, which defeats should_stop's hard round
     cap (it keeps re-reading research_rounds=0) and produces an infinite
@@ -719,7 +741,6 @@ def _collect_bounce_payload(state: AgentState) -> dict[str, Any]:
         "pre_dispatch_finding_ids": state.get("pre_dispatch_finding_ids") or [],
         "findings": state.get("findings") or [],
         "critiques": state.get("critiques") or [],
-        "rework_counts": state.get("rework_counts") or {},
         "human_feedback": state.get("human_feedback"),
     }
 
@@ -748,12 +769,22 @@ def route_from_dispatch(state: AgentState):
     model_provider = state.get("model_provider")
     model_name     = state.get("model_name")
 
+    from research_swarm.agents.papers import keyword_query
+
+    # A reviewer's re-research request steers the new searches with its own keywords, so the
+    # round does not just refetch the pages the first pass already read.
+    steer = keyword_query(state.get("rework_instructions") or "", 5) \
+        if state.get("rework_instructions") else ""
+
     sends = []
     for sq in targets:
-        role = plan.role_for(sq)
+        assignment = plan.assignment_for(sq)
+        planned = assignment.search_query.strip() if assignment else ""
+        query_text = planned or keyword_query(sq)
         sends.append(Send("worker_node", {
             "active_sub_question": sq,
-            "active_worker_role":  role.value,
+            "search_query":        f"{query_text} {steer}".strip(),
+            "scope":               _scope(plan),
             "session_id":          session_id,
             "query":               query,
             "model_provider":      model_provider,
@@ -764,57 +795,43 @@ def route_from_dispatch(state: AgentState):
 
 
 # ---------------------------------------------------------------------------
-# worker_node  (role-aware researcher for one sub-question)
+# worker_node  (gap fill for one under-covered sub-question)
 # ---------------------------------------------------------------------------
 
+async def _get_gap_fill_sources(sub_question: str, query: str, session_id: str) -> list[dict]:
+    """Where gap fill gets its sources. A module-level hook so a closed-corpus benchmark can
+    replace live web search with the task's own documents."""
+    from research_swarm.agents.gap_fill import web_sources
+
+    return await web_sources(sub_question, query, session_id)
+
+
+@traced_node("worker")
 async def worker_node(state: AgentState) -> dict[str, Any]:
-    """Research a single sub-question using the assigned worker role."""
+    """Gap fill for one sub-question: search -> fetch -> one extraction call."""
     if (early := _check_budget(state, "Worker")):
         return early
 
     sub_question = state.get("active_sub_question")
     if not sub_question:
-        # No-op worker (sent when nothing needed re-researching)
+        # No-op worker (sent when nothing needed researching)
         return {"messages": [AIMessage(content="[Worker] No sub-question assigned; skipping.")]}
 
-    role_str = state.get("active_worker_role") or WorkerRole.general.value
-    try:
-        role = WorkerRole(role_str)
-    except ValueError:
-        role = WorkerRole.general
+    from research_swarm.agents.gap_fill import run_gap_fill
+    from research_swarm.agents.papers import keyword_query
 
-    query = state.get("query")
-    max_sources = query.max_sources if query else None
-
-    # Workers use the standard tier — the smallest model that can still do
-    # reliable tool-calling + synthesis, since this is called once per
-    # sub-question per tool turn (the highest call-volume node in the graph).
-    llm   = _get_tiered_state_llm(state, "standard")
-    # Snippet condensation uses the fast tier — cheaper than the truncation
-    # it replaces would cost across the loop's repeated re-sends.
-    summarizer_llm = _get_tiered_state_llm(state, "fast")
     session_id = state.get("session_id", "default")
-    tools = _get_researcher_tools(max_sources=max_sources, session_id=session_id)
-
-    finding = await run_worker(sub_question, role, state, llm, tools, summarizer_llm=summarizer_llm)
-
-    if finding is None:
-        return {
-            "messages": [
-                AIMessage(content=f"[Worker/{role.value}] No finding for: {sub_question[:60]}")
-            ]
-        }
-
+    llm = _get_tiered_state_llm(state, "standard", agent=f"gap_fill[{sub_question[:32]}]")
+    findings = await run_gap_fill(
+        research_topic(state.get("query")), sub_question,
+        state.get("search_query") or keyword_query(sub_question), llm, session_id,
+        source_fn=_get_gap_fill_sources, scope=state.get("scope", ""),
+    )
     return {
-        "findings": [finding],
-        "messages": [
-            AIMessage(
-                content=(
-                    f"[Worker/{role.value}] Finding (conf={finding.confidence:.2f}): "
-                    f"{finding.claim[:80]}"
-                )
-            )
-        ],
+        "findings": findings,
+        "messages": [AIMessage(content=(
+            f"[GapFill] {len(findings)} finding(s) for: {sub_question[:60]}"
+        ))],
     }
 
 
@@ -822,19 +839,9 @@ async def worker_node(state: AgentState) -> dict[str, Any]:
 # collect_node  (stop-signal check + routing)
 # ---------------------------------------------------------------------------
 
+@traced_node("collect")
 async def collect_node(state: AgentState) -> dict[str, Any]:
-    """Evaluate stop signal after a dispatch round; route to critic or re-dispatch.
-
-    Also records rework attempts: for any round beyond the first, every
-    sub-question the critic actually flagged weak/refuted (see
-    ``_weak_or_refuted_sub_questions``) gets its rework_counts bumped by one
-    -- not every ``_research_targets(state)`` entry, which also includes
-    sub-questions with no finding at all (worker failure, or the mandatory
-    round-0->round-1 loop that always fires before critic ever runs). This
-    runs before dispatch_node/route_from_dispatch see the new counts for the
-    *next* round, and after they saw the (unchanged) counts for *this*
-    round — so nothing drifts mid-round.
-    """
+    """Evaluate the stop signal after a dispatch round; route to the verifier or re-dispatch."""
     from research_swarm.graph.stop import should_stop
 
     findings             = state.get("findings") or []
@@ -844,19 +851,7 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
     max_rounds           = settings.max_research_rounds(depth)
     human_feedback       = state.get("human_feedback")
 
-    await _ingest_round_evidence(state, findings)
-
     new_rounds = research_rounds + 1
-
-    # Only sub-questions the critic actually flagged weak/refuted count
-    # against the rework budget -- not every _research_targets() entry, which
-    # also includes sub-questions with no finding at all (a worker failure,
-    # or the mandatory round-0->round-1 loop that fires before critic ever
-    # runs). See _weak_or_refuted_sub_questions.
-    rework_counts = dict(state.get("rework_counts") or {})
-    if research_rounds > 0:
-        for key in _weak_or_refuted_sub_questions(state):
-            rework_counts[key] = rework_counts.get(key, 0) + 1
 
     # Human feedback always overrides stop signal — more research requested.
     if human_feedback:
@@ -865,7 +860,7 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
             "research_rounds": new_rounds,
             "next_agent": "dispatch",
             "human_feedback": None,   # consume so it doesn't re-trigger
-            "rework_counts": rework_counts,
+            "rework_instructions": None,
             "messages": [AIMessage(
                 content=f"[Collect] Round {new_rounds}: re-dispatching (human feedback).",
             )],
@@ -877,20 +872,20 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
         research_rounds=new_rounds,
         max_rounds=max_rounds,
         novelty_threshold=settings.stop_novelty_threshold,
-        similarity_threshold=settings.stop_similarity_threshold,
     )
 
     logger.info("Collect round %d: stop=%s reason=%s", new_rounds, stop, reason)
 
-    next_agent = "critic" if stop else "dispatch"
+    next_agent = "verifier" if stop else "dispatch"
     return {
         "research_rounds": new_rounds,
         "next_agent": next_agent,
-        "rework_counts": rework_counts,
+        # A reviewer-requested round (graph/rework.py) is exactly one round: clear the request.
+        "rework_instructions": None,
         "messages": [
             AIMessage(
                 content=(
-                    f"[Collect] Round {new_rounds}: {'→ critic' if stop else '→ re-dispatch'}. "
+                    f"[Collect] Round {new_rounds}: {'→ verifier' if stop else '→ re-dispatch'}. "
                     f"Reason: {reason}"
                 )
             )
@@ -899,86 +894,37 @@ async def collect_node(state: AgentState) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# critic_node
+# verifier_node  (one pass over every finding)
 # ---------------------------------------------------------------------------
 
-async def critic_node(state: AgentState) -> dict[str, Any]:
-    """Review findings, then decide whether to loop back for rework.
-
-    Weak/refuted findings that haven't hit the per-finding rework cap
-    (settings.max_rework_attempts) get routed back through dispatch_node for
-    another attempt; everything else proceeds to fact_checker. This is the
-    only place next_agent="dispatch" gets set after critic runs, so
-    route_from_critic just reads it.
-    """
-    if (early := _check_budget(state, "Critic", pool="review")):
+@traced_node("verifier")
+async def verifier_node(state: AgentState) -> dict[str, Any]:
+    """One pass that checks every finding against its evidence window (agents/verifier.py)."""
+    if (early := _check_budget(state, "Verifier", pool="review")):
         return early
-    # Critic uses fast tier — structured extraction, not synthesis
-    llm = _get_tiered_state_llm(state, "fast", pool="review")
-    new_critiques = await run_critic(state, llm)
-    logger.info("Critic produced %d critique(s).", len(new_critiques))
+    from research_swarm.agents.verifier import run_verifier
 
-    # _research_targets needs this round's critiques to compute weak/refuted
-    # targets, but they aren't merged into state until this node returns --
-    # build a temp view so the same shared function sees them now.
-    temp_state: AgentState = {  # type: ignore[typeddict-item]
-        **state,
-        "critiques": (state.get("critiques") or []) + new_critiques,
-    }
-    rework_targets = _research_targets(temp_state)
-
-    depth = _depth_str(state)
-    max_rounds = settings.max_research_rounds(depth)
-    research_rounds = state.get("research_rounds", 0)
-
-    if rework_targets and research_rounds < max_rounds:
-        next_agent = "dispatch"
-        logger.info(
-            "Critic: %d finding(s) weak/refuted and under the rework cap (%d) — re-dispatching.",
-            len(rework_targets), settings.max_rework_attempts,
-        )
-    else:
-        next_agent = "fact_checker"
-        if rework_targets:
-            logger.info(
-                "Critic: %d finding(s) remain weak/refuted but hit the round cap "
-                "(%d/%d) — proceeding to fact-checker.",
-                len(rework_targets), research_rounds, max_rounds,
-            )
-
+    llm = _get_tiered_state_llm(state, "fast", pool="review", agent="verifier")
+    findings, critiques, conflicts = await run_verifier(state, llm)
     return {
-        "critiques": new_critiques,
-        "next_agent": next_agent,
-        "messages": [
-            AIMessage(content=f"[Critic] Reviewed {len(new_critiques)} finding(s).")
-        ],
+        "findings": findings,
+        "critiques": critiques,
+        "fact_conflicts": conflicts,
+        "messages": [AIMessage(content=(
+            f"[Verifier] Checked {len(findings)} finding(s); {len(conflicts)} conflict(s)."
+        ))],
     }
 
 
-# ---------------------------------------------------------------------------
-# fact_checker_node
-# ---------------------------------------------------------------------------
 
-async def fact_checker_node(state: AgentState) -> dict[str, Any]:
-    if (early := _check_budget(state, "FactChecker", pool="review")):
-        return early
-    llm = _get_tiered_state_llm(state, "fast", pool="review")
-    updated_findings = await run_fact_checker(state, llm)
-    logger.info("FactChecker updated %d finding(s).", len(updated_findings))
-    return {
-        "findings": updated_findings,
-        "messages": [
-            AIMessage(
-                content=f"[FactChecker] Updated confidence on {len(updated_findings)} finding(s)."
-            )
-        ],
-    }
+
 
 
 # ---------------------------------------------------------------------------
 # writer_node
 # ---------------------------------------------------------------------------
 
+@traced_node("writer")
 async def writer_node(state: AgentState) -> dict[str, Any]:
     """Synthesise the final report.
 
@@ -991,9 +937,12 @@ async def writer_node(state: AgentState) -> dict[str, Any]:
     Only the *optional* LLM judge pass below stays budget-gated -- it's
     supplementary, not the report itself.
     """
-    # Writer uses the thorough tier — synthesis quality matters most here
-    llm = _get_tiered_state_llm(state, "thorough", pool="review")
-    report = await run_writer(state, llm)
+    # The large model when "writer" is in settings.large_model_stages (the default) -- synthesis
+    # quality matters most here
+    llm = _get_tiered_state_llm(state, "thorough", pool="review", agent="writer")
+    from research_swarm.agents.writer import run_attributed_writer
+
+    report = await run_attributed_writer(state, llm)
 
     if settings.llm_judge_enabled:
         session_id = state.get("session_id", "default")
@@ -1003,7 +952,9 @@ async def writer_node(state: AgentState) -> dict[str, Any]:
         except BudgetExceeded:
             logger.info("Writer: skipping LLM judge — budget exhausted.")
         else:
-            judge_llm = _get_tiered_state_llm(state, settings.llm_judge_tier, pool="review")
+            judge_llm = _get_tiered_state_llm(
+                state, settings.llm_judge_tier, pool="review", agent="judge",
+            )
             query = state.get("query")
             plan = state.get("plan")
             judge_result = await judge_report(
@@ -1011,6 +962,13 @@ async def writer_node(state: AgentState) -> dict[str, Any]:
             )
             report = report.model_copy(update={"llm_judge": judge_result})
 
+    trace_event(
+        state.get("session_id", "default"), "writer.report", "note",
+        title=report.title, n_sections=len(report.sections or []),
+        n_references=len(report.references or []),
+        faithfulness=getattr(report.quality_score, "faithfulness", None),
+        text=report.model_dump_json(exclude={"references"}),
+    )
     logger.info("Writer produced report: %r", report.title)
     return {
         "final_report": report,
@@ -1020,30 +978,3 @@ async def writer_node(state: AgentState) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# researcher_node  (legacy — kept for backward-compat with old tests/checkpoints)
-# ---------------------------------------------------------------------------
-
-async def researcher_node(state: AgentState) -> dict[str, Any]:
-    """Legacy researcher node — routes through dispatch in Phase 4.
-
-    Retained so existing tests and old checkpoints that reference 'researcher'
-    as a next_agent value continue to work.  New sessions use dispatch_node.
-    """
-    if (early := _check_budget(state, "Researcher")):
-        return early
-
-    query = state.get("query")
-    if query is None:
-        logger.error("researcher_node called with no query — skipping.")
-        return {"messages": [AIMessage(content="[Researcher] No query; skipping.")]}
-
-    llm   = _get_tiered_state_llm(state, "standard")
-    tools = _get_researcher_tools(max_sources=query.max_sources if query else None)
-    new_findings = await run_researcher(state, llm, tools)
-    logger.info("Researcher (legacy) produced %d finding(s).", len(new_findings))
-    return {
-        "findings": new_findings,
-        "human_feedback": None,
-        "messages": [AIMessage(content=f"[Researcher] Produced {len(new_findings)} finding(s).")],
-    }
