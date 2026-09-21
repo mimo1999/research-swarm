@@ -1,9 +1,9 @@
 """LLM-as-a-judge reviewer for generated reports.
 
-Complements ``eval/faithfulness.py`` (embedding cosine similarity between
-section bodies and cited snippets) with an independent LLM review pass --
-embeddings can't catch a report that answers the wrong question, skips a
-sub-question, cites a reference that doesn't exist, or just reads poorly.
+A holistic review pass over the finished report (coherence, relevance, completeness, citation
+quality) that catches what no mechanical check can: a report that answers the wrong question,
+skips a sub-question, cites a reference that doesn't exist, or just reads poorly. For sentence-
+level faithfulness and citation checks against the source documents see ``eval/claims.py``.
 
 Public API::
 
@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from research_swarm.agents._utils import recover_from_parse_failure, schema_output_instruction
+from research_swarm.agents._utils import (
+    ainvoke_with_retry,
+    recover_from_parse_failure,
+    schema_output_instruction,
+)
 from research_swarm.schemas.judge import JudgeVerdict, LLMJudgeResult
 
 if TYPE_CHECKING:
@@ -127,8 +131,8 @@ async def judge_report(
     )
 
     try:
-        result: LLMJudgeResult = await structured_llm.ainvoke(
-            [SystemMessage(content=_SYSTEM_PROMPT), user_msg]
+        result: LLMJudgeResult = await ainvoke_with_retry(
+            structured_llm, [SystemMessage(content=_SYSTEM_PROMPT), user_msg], agent="judge",
         )
     except Exception as exc:
         logger.warning("LLM judge failed: %s", exc)
