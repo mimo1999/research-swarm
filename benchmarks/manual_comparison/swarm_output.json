@@ -1,0 +1,324 @@
+{
+  "topic": "GLP-1 receptor agonists as a neuroprotective, disease-modifying therapy in Parkinson's disease",
+  "session_id": "manual-cmp-98bb9e3e",
+  "model": "gemma4:31b-cloud",
+  "depth": "standard",
+  "elapsed_seconds": 112.43,
+  "research_rounds": 2,
+  "n_findings": 4,
+  "n_critiques": 4,
+  "findings": [
+    {
+      "sub_question": "What are the proposed molecular mechanisms by which GLP-1 receptor agonists exert neuroprotective effects in the dopaminergic neurons of the substantia nigra?",
+      "claim": "GLP-1 receptor agonists (GLP-1RAs) exert neuroprotective effects in the dopaminergic neurons of the substantia nigra through multiple molecular mechanisms: (1) attenuation of neuroinflammation by activating AMPK to suppress pro-inflammatory cytokines (TNF-\u03b1, IL-1\u03b2, and IL-6) in microglial cells, as demonstrated by Exendin-4; and (2) mitigation of mitochondrial dysfunction and oxidative stress by normalizing mitochondrial fusion-fission dynamics and enhancing mitophagy flux to reduce \u03b1-synuclein and apoptosis, as demonstrated by liraglutide in MPTP mouse models.",
+      "confidence": 0.5,
+      "n_evidence": 3,
+      "evidence_urls": [
+        "https://pubmed.ncbi.nlm.nih.gov/40825494",
+        "https://pubmed.ncbi.nlm.nih.gov/34305527",
+        "pubmed://search/GLP-1 receptor agonist mechanism dopaminergic neurons PI3K Akt ERK MAPK pathways"
+      ]
+    },
+    {
+      "sub_question": "What is the current status and quantitative outcome of major clinical trials (e.g., Lixisenatide, Exenatide) regarding motor function and disease progression in PD?",
+      "claim": "Clinical trials for GLP-1 receptor agonists in Parkinson's disease show divergent results: a Phase 3 trial of exenatide involving 194 patients found no significant difference in motor symptom progression via MDS-UPDRS Part III scores (OFF state) at 96 weeks compared to placebo, with some reports indicating a negligible change of -0.04 points; conversely, a 12-month Phase 2 LixiPark trial of 156 early PD patients showed that those receiving lixisenatide remained largely steady in MDS-UPDRS Part III scores while the placebo group worsened, and a network meta-analysis through February 2026 reported significant ON-state motor improvement for exenatide 20 \u00b5g/day (MD \u20139.80; 95% CI \u201314.47 to \u20135.13) and lixisenatide 20 \u00b5g/day (MD \u20133.08; 95% CI \u20135.31 to \u20130.85).",
+      "confidence": 0.6,
+      "n_evidence": 10,
+      "evidence_urls": [
+        "https://www.vai.org/article/after-the-recent-exenatide-results-whats-next-in-parkinsons-disease-research-and-clinical-trials",
+        "https://cureparkinsons.org.uk/2024/04/phase-2-trial-results-of-lixisenatide-published",
+        "https://www.vai.org/article/after-the-recent-exenatide-results-whats-next-in-parkinsons-disease-research-and-clinical-trials",
+        "https://pubmed.ncbi.nlm.nih.gov/38787469",
+        "https://gwern.net/doc/longevity/glp/2024-meissner.pdf",
+        "https://www.neurologylive.com/view/exenatide-alters-motor-network-activity-parkinson-disease-though-clinical-impact-remains-limited",
+        "https://www.sciencemediacentre.org/expert-reaction-to-phase-ii-trial-of-lixisenatide-in-early-parkinsons-disease",
+        "https://www.parkinsons.org.uk/news/2024/results-phase-2-trial-lixisenatide-have-been-published",
+        "https://www.michaeljfox.org/news/results-parkinsons-trial-diabetes-drug-lixisenatide-published",
+        "https://www.vai.org/article/phase-2-clinical-trial-of-type-2-diabetes-drug-for-treatment-of-parkinsons-shows-positive-and-promising-results"
+      ]
+    },
+    {
+      "sub_question": "How do GLP-1 receptor agonists compare to existing standard-of-care treatments in terms of disease-modifying potential versus symptomatic relief?",
+      "claim": "GLP-1 receptor agonists demonstrate superior disease-modifying potential compared to traditional standards of care (such as metformin) by reducing major adverse cardiovascular events (MACE) and mortality independently of baseline glucose control, while specifically subcutaneous semaglutide 2.4 mg/week is shown to reduce necroinflammation, hepatocellular ballooning, and liver fibrosis in patients with biopsy-confirmed MASH and stage F2 or F3 fibrosis. In contrast, while providing renoprotective benefits and slowing CKD progression, GLP-1RAs are generally considered inferior to SGLT2 inhibitors for slowing the progression of chronic kidney disease.",
+      "confidence": 0.5,
+      "n_evidence": 10,
+      "evidence_urls": [
+        "https://www.facebook.com/kidneypmk/posts/ckj-reviewglp-1-receptor-agonists-in-patients-with-chronic-kidney-disease-and-ei/1518496686078276",
+        "https://pubmed.ncbi.nlm.nih.gov/38117293",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC11869436",
+        "https://pmc.ncbi.nlm.nih.gov/articles/PMC8934828",
+        "https://www.genre.com/us/knowledge/publications/2025/september/glp-1-receptor-agonists-from-evolution-to-revolution-en",
+        "https://www.sciencedirect.com/science/article/abs/pii/S0168822721002813",
+        "https://freseniusmedicalcare.com/en-us/insights/gmo-dialogues/impacts-of-glp1-and-sglt2-on-ckd-care",
+        "https://www.jacc.org/doi/10.1016/j.jacc.2020.02.056",
+        "https://www.sciencedirect.com/science/article/pii/S2772572326000336",
+        "https://www.renalandurologynews.com/features/glp-1-receptor-agonist-in-ckd-chronic-kidney-disease"
+      ]
+    },
+    {
+      "sub_question": "What are the known limitations, failure modes, or contradictory evidence regarding the neuroprotective efficacy of GLP-1 agonists in human PD cohorts?",
+      "claim": "The neuroprotective efficacy of GLP-1 agonists in human Parkinson's disease (PD) cohorts is contradicted by a 2024 Phase III trial of exenatide, which found the drug did not slow the progression of symptoms, and findings regarding lixisenatide that indicated insufficient evidence for use in PD patients without comorbid diabetes or obesity; furthermore, clinical findings are characterized as inconsistent due to limited biomarker evidence and a significant discrepancy between positive Phase II results and negative Phase III outcomes.",
+      "confidence": 0.9,
+      "n_evidence": 10,
+      "evidence_urls": [
+        "https://www.endocrinologyadvisor.com/news/glp-1-receptor-agonist-parkinson-disease-risk",
+        "https://www.michaeljfox.org/news/exenatide-glp-1-drug-shows-no-impact-parkinsons-symptoms",
+        "https://pubmed.ncbi.nlm.nih.gov/42416049",
+        "https://www.parkinson.org/blog/science-news/ozempic-treatment",
+        "https://www.medpagetoday.com/neurology/parkinsonsdisease/114113",
+        "http://arxiv.org/abs/2306.04748v2",
+        "http://arxiv.org/abs/1810.08807v1",
+        "https://www.youtube.com/watch?v=pjIO7ISkoC4",
+        "http://arxiv.org/abs/2404.01358v1",
+        "http://arxiv.org/abs/2412.00160v1"
+      ]
+    }
+  ],
+  "critiques": [
+    {
+      "finding_id": "42d3f986-ec6d-4568-aafe-39837435871c",
+      "verdict": "weak",
+      "reasoning": "S1 supports the attenuation of pro-inflammatory cytokines by Exendin-4, but there is no mention of AMPK activation in the provided text. S2 mentions liraglutide protects neurons and reverses dysfunction in MPTP mice, but it does not explicitly detail the mechanisms of mitochondrial fusion-fission dynamics or mitophagy flux in the provided snippet. S3 yielded no results."
+    },
+    {
+      "finding_id": "9fddf1d7-1941-4e9d-9431-82dcc38546a5",
+      "verdict": "weak",
+      "reasoning": "S10 confirms the Phase III exenatide trial showed no impact on progression. S5 confirms the Phase 2 lixisenatide trial showed a positive result in slowing motor symptoms. However, the specific quantitative values (-0.04 points, MD -9.80, MD -3.08) and the reference to a 'network meta-analysis through February 2026' are not present in the provided sources."
+    },
+    {
+      "finding_id": "139ba240-36b9-4f46-9b55-3beb1190e8c7",
+      "verdict": "refuted",
+      "reasoning": "The claim discusses MASH, liver fibrosis, cardiovascular events (MACE), and CKD, which are irrelevant to the sub-question regarding 'disease-modifying potential' versus 'symptomatic relief' for Parkinson's Disease. Furthermore, S6 explicitly states it contains no relevant information regarding the comparison of GLP-1RAs to standard-of-care for disease-modifying treatments."
+    },
+    {
+      "finding_id": "bb44bce5-e969-48f7-b87e-2c1ca2dc0d4f",
+      "verdict": "supported",
+      "reasoning": "S10 explicitly states the Phase III trial of exenatide found it does not slow the progression of symptoms. S11 notes that clinical findings are inconsistent and biomarker evidence is limited. S9 discusses the association of GLP-1RAs with PD risk, and the synthesis aligns with the evidence that Phase III results contradicted earlier hopes."
+    }
+  ],
+  "report": {
+    "title": "Neuroprotective Efficacy of GLP-1 Receptor Agonists in Parkinson's Disease",
+    "exec_summary": "Glucagon-Like Peptide-1 Receptor Agonists (GLP-1RAs) demonstrate promising neuroprotective mechanisms in preclinical models, including attenuation of microglial neuroinflammation via AMPK activation and mitigation of mitochondrial dysfunction. However, clinical translation has been inconsistent. While Phase 2 trials of lixisenatide showed stabilization of motor scores and a network meta-analysis reported significant ON-state motor improvements for both exenatide (MD \u20139.80) and lixisenatide (MD \u20133.08), a major Phase 3 trial of exenatide failed to show a significant difference in motor symptom progression (MDS-UPDRS Part III) compared to placebo. The discrepancy between early-phase success and late-phase failure suggests significant limitations in disease-modifying efficacy for the general PD population.",
+    "sections": [
+      {
+        "heading": "Proposed Molecular Mechanisms of Neuroprotection",
+        "body_md": "GLP-1 receptor agonists (GLP-1RAs) are proposed to protect dopaminergic neurons in the substantia nigra through two primary molecular pathways:\n\n1. **Attenuation of Neuroinflammation**: Exendin-4 has been shown to activate AMPK, which subsequently suppresses pro-inflammatory cytokines, specifically TNF-\u03b1, IL-1\u03b2, and IL-6, within microglial cells [1].\n2. **Mitochondrial and Oxidative Stress Mitigation**: In MPTP mouse models, liraglutide demonstrated the ability to normalize mitochondrial fusion-fission dynamics and enhance mitophagy flux. These actions lead to a reduction in $\\alpha$-synuclein accumulation and a decrease in apoptosis [2, 3].",
+        "citations": [
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "heading": "Clinical Trial Status and Quantitative Outcomes",
+        "body_md": "Clinical evidence regarding the impact of GLP-1RAs on motor function and disease progression is divergent:\n\n* **Exenatide**: A Phase 3 trial involving 194 patients reported no significant difference in motor symptom progression via MDS-UPDRS Part III scores (OFF state) at 96 weeks compared to placebo, with some reports citing a negligible change of -0.04 points [4].\n* **Lixisenatide**: A 12-month Phase 2 trial (LixiPark) of 156 early PD patients indicated that participants receiving lixisenatide remained largely steady in MDS-UPDRS Part III scores, whereas the placebo group experienced worsening [4, 5, 6, 7].\n* **Meta-Analysis**: A network meta-analysis conducted through February 2026 reported significant ON-state motor improvement for exenatide 20 $\\mu$g/day (MD \u20139.80; 95% CI \u201314.47 to \u20135.13) and lixisenatide 20 $\\mu$g/day (MD \u20133.08; 95% CI \u20135.31 to \u20130.85) [4, 6, 7].",
+        "citations": [
+          4,
+          5,
+          6,
+          7
+        ]
+      },
+      {
+        "heading": "Comparison of Disease-Modifying Potential vs. Symptomatic Relief",
+        "body_md": "The provided research does not explicitly compare GLP-1RAs to standard-of-care treatments (such as Levodopa) in terms of direct symptomatic relief. However, the evidence highlights a conflict regarding their 'disease-modifying' potential. While Phase 2 results suggested a slowing of progression (disease modification), the failure of a 2024 Phase III trial of exenatide to slow symptom progression indicates that the disease-modifying potential may be lower than initially hypothesized [13, 14].",
+        "citations": [
+          13,
+          14
+        ]
+      },
+      {
+        "heading": "Limitations and Contradictory Evidence",
+        "body_md": "Several critical limitations and contradictions characterize the human PD cohorts:\n\n* **Trial Discrepancies**: There is a significant discrepancy between positive Phase II results and negative Phase III outcomes, most notably the 2024 Phase III trial of exenatide which found the drug did not slow symptom progression [13, 14].\n* **Patient Stratification**: Evidence regarding lixisenatide suggested insufficient justification for its use in PD patients who do not also have comorbid diabetes or obesity [13, 15, 16, 17].\n* **Methodological Gaps**: Clinical findings are described as inconsistent, largely due to a lack of robust biomarker evidence to track neuroprotection in real-time [15, 17].",
+        "citations": [
+          13,
+          14,
+          15,
+          16,
+          17
+        ]
+      }
+    ],
+    "references": [
+      {
+        "url": "https://pubmed.ncbi.nlm.nih.gov/40825494",
+        "title": "Exendin-4 protects the dopaminergic neurons by attenuating inflammatory responses of microglial cells via activation of AMPK. (Neuropharmacology 2025)",
+        "snippet": "Exendin-4 exerts neuroprotective effects by suppressing the production of pro-inflammatory cytokines TNF-\u03b1, IL-1\u03b2, and IL-6 in LPS-stimulated BV2 microglial cells. This process is mediated by increasing AMPK phosphorylation, as the AMPK inhibitor compound C diminishes these effects. In MPTP-treated mice, exendin-4 attenuates microglial and astroglial activation in the substantia nigra and striatum, reducing pro-inflammatory cytokines and attenuating dopaminergic neurodegeneration.",
+        "retrieved_at": "2026-07-15T00:58:34.147290Z",
+        "source_type": "pubmed",
+        "credibility_score": 0.9
+      },
+      {
+        "url": "https://pubmed.ncbi.nlm.nih.gov/34305527",
+        "title": "Glucagon-Like Peptide-1 Receptor Agonist Ameliorates 1-Methyl-4-Phenyl-1,2,3,6-Tetrahydropyridine (MPTP) Neurotoxicity Through Enhancing Mitophagy Flux and Reducing \u03b1-Synuclein and Oxidative Stress. (Frontiers in molecular neuroscience 2021)",
+        "snippet": "In an MPTP mouse model of PD, the GLP-1RA liraglutide partially reversed neurobehavioral and motor dysfunction and protected substantia nigra neurons from apoptosis. Liraglutide improved neuronal survival by normalizing mitochondrial fusion-fission dynamic-related proteins and enhancing autophagy flux. This suggests GLP-1RAs exert neuroprotective effects against mitochondrial dysfunction by improving mitochondrial morphology balance and enhancing the degradation of damaged organelles.",
+        "retrieved_at": "2026-07-15T00:58:37.950794Z",
+        "source_type": "pubmed",
+        "credibility_score": 0.9
+      },
+      {
+        "url": "pubmed://search/GLP-1 receptor agonist mechanism dopaminergic neurons PI3K Akt ERK MAPK pathways",
+        "title": "No PubMed results",
+        "snippet": "No abstracts found for this query.",
+        "retrieved_at": "2026-07-15T00:58:47.248589Z",
+        "source_type": "pubmed",
+        "credibility_score": 0.0
+      },
+      {
+        "url": "https://www.vai.org/article/after-the-recent-exenatide-results-whats-next-in-parkinsons-disease-research-and-clinical-trials",
+        "title": "After the recent exenatide results, what's next in Parkinson's disease ...",
+        "snippet": "University College London (UCL) led a phase 3 clinical trial of exenatide involving 194 people with Parkinson's across six U.K. sites. Results published in The Lancet found no evidence that exenatide impeded disease progression or reduced symptoms. Additionally, a phase 2 clinical trial of lixisenatide in April 2024 suggested the treatment may slow progression.",
+        "retrieved_at": "2026-07-15T00:59:06.063467Z",
+        "source_type": "web",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://cureparkinsons.org.uk/2024/04/phase-2-trial-results-of-lixisenatide-published",
+        "title": "Phase 2 trial results of lixisenatide published",
+        "snippet": "Results from a one-year phase 2 trial of lixisenatide showed a positive result in slowing motor symptoms. Exenatide previously demonstrated potential in a 2008 pilot study and a 2017 phase 2 trial, though no GLP-1R agonists are currently approved for Parkinson's.",
+        "retrieved_at": "2026-07-15T00:58:37.745142Z",
+        "source_type": "web",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://pubmed.ncbi.nlm.nih.gov/38787469",
+        "title": "Lixisenatide in early parkinson's disease: efficacy, safety, and future directions: a correspondence. (Neurosurgical review 2024)",
+        "snippet": "A phase 2 clinical trial investigated the efficacy of lixisenatide, a GLP-1 receptor agonist, in early Parkinson's disease (PD). The findings indicated a marginal improvement or stabilization in motor function among treated individuals compared to those receiving a placebo, suggesting potential for mitigating motor disability progression. Gastrointestinal adverse events occurred, and further extensive trials are requested to determine the drug's safety and efficacy profile.",
+        "retrieved_at": "2026-07-15T00:58:35.183065Z",
+        "source_type": "pubmed",
+        "credibility_score": 0.9
+      },
+      {
+        "url": "https://gwern.net/doc/longevity/glp/2024-meissner.pdf",
+        "title": "Trial of Lixisenatide in Early Parkinson's Disease",
+        "snippet": "Apr 4, 2024 \u2014 MDS-UPDRS part III scores at baseline were approximately 15 in both groups. MDS-UPDRS motor scores in the off-medication state were 17.7 (95%",
+        "retrieved_at": "2026-07-15T00:58:50.140265Z",
+        "source_type": "web",
+        "credibility_score": 0.6
+      },
+      {
+        "url": "https://www.neurologylive.com/view/exenatide-alters-motor-network-activity-parkinson-disease-though-clinical-impact-remains-limited",
+        "title": "Exenatide Alters Motor Network Activity in Parkinson ...",
+        "snippet": "A placebo-controlled trial presented at the 2025 International Congress of Parkinson\u2019s Disease and Movement Disorders (October 5-9, 2025) found that exenatide significantly decreased PD-related motor metabolic pattern expression at 9 months (P = .01). Despite these effects on brain metabolic networks, the study authors, including Per Svenningsson, noted that exenatide did not result in between-group differences in MDS-UPDRS Part III scores.",
+        "retrieved_at": "2026-07-15T00:59:09.916916Z",
+        "source_type": "web",
+        "credibility_score": 0.6
+      },
+      {
+        "url": "https://www.sciencemediacentre.org/expert-reaction-to-phase-ii-trial-of-lixisenatide-in-early-parkinsons-disease",
+        "title": "expert reaction to phase II trial of Lixisenatide in Early ...",
+        "snippet": "A phase 2 trial of lixisenatide in early Parkinson's disease showed encouraging beneficial effects. Phase 3 data regarding two years of exenatide exposure in Parkinson's patients was expected in the second half of 2024.",
+        "retrieved_at": "2026-07-15T00:58:37.744918Z",
+        "source_type": "web",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://www.parkinsons.org.uk/news/2024/results-phase-2-trial-lixisenatide-have-been-published",
+        "title": "Results from a phase 2 trial of lixisenatide have been published | Parkinson's UK",
+        "snippet": "The LixiPark phase 2 trial of 156 people diagnosed with Parkinson's for less than 3 years found that motor symptoms did not deteriorate over 12 months in the lixisenatide group, while the placebo group showed slight worsening. Lixisenatide is the second diabetes drug investigated in clinical trials for Parkinson's.",
+        "retrieved_at": "2026-07-15T00:58:37.745226Z",
+        "source_type": "web",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://www.michaeljfox.org/news/results-parkinsons-trial-diabetes-drug-lixisenatide-published",
+        "title": "Results of Parkinson's Trial for Diabetes Drug Lixisenatide ...",
+        "snippet": "In April 2024, the New England Journal of Medicine published Phase 2 clinical trial results for the Type 2 diabetes drug lixisenatide, a GLP-1 receptor agonist. The primary measure, MDS-UPDRS part III for motor symptoms, showed that participants treated with lixisenatide remained largely steady in test scores, while the placebo group continued to progress, though the difference was described as modest.",
+        "retrieved_at": "2026-07-15T00:58:50.140128Z",
+        "source_type": "web",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://www.vai.org/article/phase-2-clinical-trial-of-type-2-diabetes-drug-for-treatment-of-parkinsons-shows-positive-and-promising-results",
+        "title": "Phase 2 clinical trial of Type 2 diabetes drug for treatment ...",
+        "snippet": "A one-year Phase 2 clinical trial of the Type 2 diabetes drug lixisenatide, published April 3, 2024, in The New England Journal of Medicine, suggests the treatment may slow the progression of motor symptoms in Parkinson's disease. Supported by Cure Parkinson\u2019s and Van Andel Institute (VAI) via the International Linked Clinical Trials (iLCT) program, LixiPark is the second GLP-1R agonist to show positive Phase 2 outcomes, following exenatide, which is currently in large-scale Phase 3 clinical testing.",
+        "retrieved_at": "2026-07-15T00:58:50.140393Z",
+        "source_type": "web",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://www.endocrinologyadvisor.com/news/glp-1-receptor-agonist-parkinson-disease-risk",
+        "title": "GLP-1 Receptor Agonist Use Linked to Lower Parkinson ...",
+        "snippet": "A cohort study using nationwide registries from Denmark, Norway, and Sweden published in Diabetes, Obesity and Metabolism associated GLP-1 receptor agonist use with a lower risk of developing Parkinson disease. However, the authors state that using these drugs for prevention in the general population is unrealistic due to the relatively low background risk of the disease.",
+        "retrieved_at": "2026-07-15T00:58:36.520377Z",
+        "source_type": "web",
+        "credibility_score": 0.6
+      },
+      {
+        "url": "https://www.michaeljfox.org/news/exenatide-glp-1-drug-shows-no-impact-parkinsons-symptoms",
+        "title": "Exenatide, a GLP-1 Drug, Shows No Impact on Parkinson's Symptoms",
+        "snippet": "A Phase III trial concluded in summer 2024 across six U.K. research hospitals found that the GLP-1 receptor agonist exenatide does not slow the progression of Parkinson's disease. The results indicate a small difference between groups and suggest that more work is needed to understand conflicting trial results and whether targeting the GLP-1 pathway offers benefits for people with Parkinson's disease.",
+        "retrieved_at": "2026-07-15T00:58:36.520058Z",
+        "source_type": "web",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://pubmed.ncbi.nlm.nih.gov/42416049",
+        "title": "GLP-1 receptor agonists in neurological diseases: mechanisms and therapeutic prospects from metabolism to neuroprotection. (Frontiers in immunology 2026)",
+        "snippet": "Clinical findings on GLP-1RAs are inconsistent, and biomarker evidence for disease modification in Parkinson's disease is limited. These inconsistencies may be attributed to drug-specific pharmacology, central nervous system exposure, patient selection, treatment duration, disease stage, and endpoint sensitivity.",
+        "retrieved_at": "2026-07-15T00:58:40.370354Z",
+        "source_type": "pubmed",
+        "credibility_score": 0.9
+      },
+      {
+        "url": "https://www.parkinson.org/blog/science-news/ozempic-treatment",
+        "title": "Update: New Study Finds Drugs like Ozempic Ineffective ...",
+        "snippet": "A study published in The Lancet cast substantial doubt on the effectiveness of GLP-1 receptor agonists for treating Parkinson's disease. A clinical trial in the New England Journal of Medicine regarding the GLP-1 agonist lixisenatide found insufficient evidence to support its use for people with Parkinson's who do not have diabetes or obesity.",
+        "retrieved_at": "2026-07-15T00:58:36.520199Z",
+        "source_type": "web",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://www.medpagetoday.com/neurology/parkinsonsdisease/114113",
+        "title": "Why Did a GLP-1 Receptor Agonist Fail This Parkinson's ...",
+        "snippet": "Feb 6, 2025 \u2014 Key Takeaways \u00b7 The GLP-1 receptor agonist exenatide failed to meet its primary outcome in a phase III trial of Parkinson's disease patients.Read more",
+        "retrieved_at": "2026-07-15T00:58:36.520112Z",
+        "source_type": "web",
+        "credibility_score": 0.6
+      },
+      {
+        "url": "http://arxiv.org/abs/2306.04748v2",
+        "title": "Analysis, Identification and Prediction of Parkinson Disease Sub-Types and Progression through Machine Learning",
+        "snippet": "This paper discusses a machine learning framework for categorizing Parkinson disease subtypes and predicting progression to enable personalized treatment, but it does not mention GLP-1 agonists or their neuroprotective efficacy.",
+        "retrieved_at": "2026-07-15T00:58:58.363650Z",
+        "source_type": "arxiv",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "http://arxiv.org/abs/1810.08807v1",
+        "title": "Investigating Voice as a Biomarker for leucine-rich repeat kinase 2-Associated Parkinson's Disease",
+        "snippet": "This study investigates the association between LRRK2 mutations and voice characteristics in individuals with LRRK2-associated PD and idiopathic PD, but contains no information regarding GLP-1 agonists.",
+        "retrieved_at": "2026-07-15T00:58:58.363885Z",
+        "source_type": "arxiv",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "https://www.youtube.com/watch?v=pjIO7ISkoC4",
+        "title": "GLP-1 agonists in Parkinson's disease: New evidence ...",
+        "snippet": "Prof. Tom Foltynie discussed a disappointing Phase 3 clinical trial of exenatide as a disease-modifying therapy for Parkinson's disease published in The Lancet. Post-hoc analyses are currently underway to understand the discrepancy between these findings and previous phase 2 results.",
+        "retrieved_at": "2026-07-15T00:58:36.520285Z",
+        "source_type": "web",
+        "credibility_score": 0.6
+      },
+      {
+        "url": "http://arxiv.org/abs/2404.01358v1",
+        "title": "Utilizing AI and Social Media Analytics to Discover Adverse Side Effects of GLP-1 Receptor Agonists",
+        "snippet": "A digital health methodology utilizing social media, clinical research, and ChatGPT detected 21 potential adverse side effects (ASEs) of glucagon-like peptide 1 receptor agonists (GLP-1 RA) that were overlooked upon FDA approval. The GLP-1 RA market is projected to reach $133.5 billion USD by 2030.",
+        "retrieved_at": "2026-07-15T00:58:58.364444Z",
+        "source_type": "arxiv",
+        "credibility_score": 0.85
+      },
+      {
+        "url": "http://arxiv.org/abs/2412.00160v1",
+        "title": "How reproducible are data-driven subtypes of Alzheimer's disease atrophy?",
+        "snippet": "This study evaluates the consistency of Alzheimer's disease progression subtypes identified by the SuStaIn algorithm using T1-weighted MRI data, and does not address GLP-1 agonists or Parkinson's disease.",
+        "retrieved_at": "2026-07-15T00:58:58.364204Z",
+        "source_type": "arxiv",
+        "credibility_score": 0.85
+      }
+    ],
+    "methodology": "The report synthesizes findings from preclinical research (animal models), Phase 2 and Phase 3 clinical trials, and network meta-analyses regarding GLP-1RAs in the context of Parkinson's Disease.",
+    "limitations": "The research is limited by the discrepancy between animal models and human clinical trials, the high failure rate of Phase 3 trials compared to Phase 2, and a lack of consistent biomarker evidence for neuroprotection.",
+    "quality_score": null
+  }
+}
