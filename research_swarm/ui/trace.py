@@ -9,12 +9,15 @@ from research_swarm.ui.style import badge, kicker
 
 # ── Label / accent colour per node ────────────────────────────────────────────
 _NODE_META: dict[str, dict] = {
-    "supervisor":   {"label": "Supervisor",    "colour": "#5c6bc0"},
-    "researcher":   {"label": "Researcher",    "colour": "#26a69a"},
-    "critic":       {"label": "Critic",        "colour": "#ef6c00"},
-    "fact_checker": {"label": "Fact-Checker",  "colour": "#2e7d32"},
-    "writer":       {"label": "Writer",        "colour": "#8e24aa"},
+    "supervisor":           {"label": "Supervisor",       "colour": "#5c6bc0"},
+    "document_worker_node": {"label": "Document reader",  "colour": "#26a69a"},
+    "paper_scout_node":     {"label": "Paper scout",      "colour": "#00897b"},
+    "paper_worker_node":    {"label": "Paper reader",     "colour": "#26a69a"},
+    "worker_node":          {"label": "Gap fill",         "colour": "#26a69a"},
+    "verifier":             {"label": "Verifier",         "colour": "#ef6c00"},
+    "writer":               {"label": "Writer",           "colour": "#8e24aa"},
 }
+_FINDING_NODES = ("document_worker_node", "paper_worker_node", "worker_node")
 _DEFAULT_META = {"label": "Agent", "colour": "#64748b"}
 
 _VERDICT_BADGE = {
@@ -40,12 +43,10 @@ def _render_update_body(node_name: str, update: dict[str, Any]) -> None:
     """Render key fields from a node state update in a readable way."""
     if node_name == "supervisor":
         _render_supervisor(update)
-    elif node_name == "researcher":
-        _render_researcher(update)
-    elif node_name == "critic":
-        _render_critic(update)
-    elif node_name == "fact_checker":
-        _render_fact_checker(update)
+    elif node_name in _FINDING_NODES:
+        _render_findings(update)
+    elif node_name == "verifier":
+        _render_verifier(update)
     elif node_name == "writer":
         _render_writer(update)
     else:
@@ -57,6 +58,14 @@ def _render_supervisor(u: dict) -> None:
     iter_n = u.get("iteration_count", "—")
     st.markdown(f"Routing to **{next_a}** &nbsp;·&nbsp; iteration {iter_n}")
     if plan := u.get("plan"):
+        frame = getattr(plan, "frame", None)
+        if frame is not None and (frame.interpretation or frame.key_constraint):
+            if frame.interpretation:
+                st.caption(f"Understood as: {frame.interpretation}")
+            if frame.key_constraint:
+                terms = f" · also: {', '.join(frame.constraint_terms)}" \
+                    if frame.constraint_terms else ""
+                st.markdown(f"Key constraint: **{frame.key_constraint}**{terms}")
         sub_qs = (
             plan.sub_questions
             if hasattr(plan, "sub_questions")
@@ -72,7 +81,7 @@ def _render_supervisor(u: dict) -> None:
             st.caption(content)
 
 
-def _render_researcher(u: dict) -> None:
+def _render_findings(u: dict) -> None:
     findings = u.get("findings", [])
     st.markdown(f"**{len(findings)}** finding(s) produced")
     if findings:
@@ -88,11 +97,11 @@ def _render_researcher(u: dict) -> None:
                     st.caption(f"confidence: {conf:.2f} · {n_src} source(s)")
 
 
-def _render_critic(u: dict) -> None:
+def _render_verifier(u: dict) -> None:
     critiques = u.get("critiques", [])
-    st.markdown(f"**{len(critiques)}** critique(s) produced")
+    st.markdown(f"**{len(critiques)}** finding(s) verified")
     if critiques:
-        with st.expander("View critiques", expanded=False):
+        with st.expander("View verdicts", expanded=False):
             for c in critiques:
                 verdict  = c.verdict   if hasattr(c, "verdict")   else c.get("verdict", "?")
                 v_str    = verdict.value if hasattr(verdict, "value") else str(verdict)
@@ -103,20 +112,9 @@ def _render_critic(u: dict) -> None:
                     st.markdown(
                         f"{badge(label, kind)} &nbsp; `{fid[:8]}`", unsafe_allow_html=True,
                     )
-                    st.markdown(reason)
-
-
-def _render_fact_checker(u: dict) -> None:
-    updated = u.get("findings", [])
-    st.markdown(f"**{len(updated)}** finding(s) fact-checked")
-    if updated:
-        with st.expander("Updated confidence scores", expanded=False):
-            for f in updated:
-                conf  = f.confidence  if hasattr(f, "confidence") else f.get("confidence", 0)
-                sub_q = f.sub_question if hasattr(f, "sub_question") else f.get("sub_question", "")
-                bar_val = int(conf * 100)
-                st.markdown(f"**{sub_q}** &nbsp;·&nbsp; `{conf:.2f}` confidence")
-                st.progress(bar_val)
+                    st.caption(reason)
+    if conflicts := u.get("fact_conflicts"):
+        st.warning(f"{len(conflicts)} pair(s) of findings contradict each other.")
 
 
 def _render_writer(u: dict) -> None:
@@ -128,9 +126,12 @@ def _render_writer(u: dict) -> None:
         st.info("Writing report…")
 
 
-def _render_raw(u: dict) -> None:
+def _render_raw(u: Any) -> None:
     with st.expander("Raw update", expanded=False):
-        st.json({k: str(v)[:300] for k, v in u.items() if k != "messages"})
+        if isinstance(u, dict):
+            st.json({k: str(v)[:300] for k, v in u.items() if k != "messages"})
+        else:
+            st.json(str(u)[:500])
 
 
 def render_trace_header() -> None:

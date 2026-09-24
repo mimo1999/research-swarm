@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from research_swarm.graph.builder import get_thread_config
+from research_swarm.graph.rework import request_rework
 from research_swarm.runtime.budget import clear_budget
 from research_swarm.runtime.session_ctx import (
     SessionCredentials,
@@ -168,13 +169,8 @@ async def resume_research(session_id: str, body: ResumeBody, request: Request):
     with session_scope(session_id):
         if body.action == "approve":
             await graph.aupdate_state(config, {"writer_instructions": body.feedback or "Approved."})
-        else:  # edit
-            await graph.aupdate_state(config, {
-                "human_feedback": (
-                    body.feedback or "Please re-research weak findings more thoroughly."
-                ),
-                "next_agent": None,
-            })
+        else:  # edit: one more research round on the weak sub-questions, then pause again
+            await request_rework(graph, config, body.feedback)
 
     # Back to 'pending' with the event log intact -- the client's reconnect
     # starts the next segment, and its Last-Event-ID stays meaningful because

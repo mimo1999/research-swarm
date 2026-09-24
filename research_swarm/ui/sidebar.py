@@ -16,11 +16,18 @@ _OLLAMA_CLOUD_MODELS = [
     "minimax-m2.7:cloud",
 ]
 
-_DEPTH_LABELS = {
-    ResearchDepth.shallow:  "Shallow  (fastest — 1 sub-question, 1 tool turn, no re-research)",
-    ResearchDepth.standard: "Standard (balanced — 4 sub-questions, 3 tool turns)",
-    ResearchDepth.deep:     "Deep     (thorough — 6 sub-questions, 6 tool turns)",
-}
+def _depth_label(depth: ResearchDepth) -> str:
+    """The depth option's label, from the live settings so it can't drift from them."""
+    n = settings.sub_questions_by_depth.get(depth.value, 4)
+    rounds = settings.max_research_rounds(depth.value)
+    name = {ResearchDepth.shallow: "Shallow  (fastest",
+            ResearchDepth.standard: "Standard (balanced",
+            ResearchDepth.deep: "Deep     (thorough"}[depth]
+    return (f"{name} — {n} sub-questions, {rounds} research "
+            f"round{'s' if rounds != 1 else ''})")
+
+
+_DEPTH_LABELS = {d: _depth_label(d) for d in ResearchDepth}
 
 _PROVIDER_LABELS = {
     "anthropic": "Anthropic (Claude)",
@@ -131,6 +138,15 @@ def render_sidebar() -> dict:
                     "review findings before the report is written."
                 ),
             )
+            llm_judge = st.toggle(
+                "LLM quality review (slower)",
+                value=False,
+                key="ui_llm_judge",
+                help=(
+                    "Adds one more model call that scores the finished report. Off by "
+                    "default: it costs a request slot on every run."
+                ),
+            )
 
         st.divider()
 
@@ -163,6 +179,7 @@ def render_sidebar() -> dict:
         "depth":             depth_key,
         "max_sources":       max_sources,
         "hitl_enabled":      hitl_enabled,
+        "llm_judge":         llm_judge,
         "uploaded_pdfs":     uploaded_pdfs or [],
         "extra_urls":        extra_urls,
         # Ollama-specific — only set when provider == "ollama"
