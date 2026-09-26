@@ -186,12 +186,12 @@ _NODE_CONFIG = {
     "document_pass_node":   {"label": "Documents", "kind": "connector", "letter": ""},
     "document_worker_node": {"label": "Document extraction", "kind": "stop", "letter": "D"},
     "dispatch_node":        {"label": "Dispatch", "kind": "connector", "letter": ""},
-    "worker_node":          {"label": "Research", "kind": "stop", "letter": "R"},
-    "researcher":           {"label": "Research", "kind": "stop", "letter": "R"},
+    "paper_scout_node":     {"label": "Paper search", "kind": "stop", "letter": "S"},
+    "paper_worker_node":    {"label": "Paper extraction", "kind": "stop", "letter": "E"},
+    "worker_node":          {"label": "Gap fill", "kind": "stop", "letter": "G"},
     "collect_node":         {"label": "Collect", "kind": "connector", "letter": ""},
-    "critic":               {"label": "Critic review", "kind": "stop", "letter": "C"},
-    "fact_checker":         {"label": "Fact-check", "kind": "stop", "letter": "F"},
-    "writer":                {"label": "Report", "kind": "stop", "letter": "W"},
+    "verifier":             {"label": "Verification", "kind": "stop", "letter": "V"},
+    "writer":               {"label": "Report", "kind": "stop", "letter": "W"},
 }
 _DEFAULT_NODE_CONFIG = {"label": "Agent", "kind": "stop", "letter": "A"}
 
@@ -214,7 +214,7 @@ def _connector_label(node: str, update: dict) -> str:
         return f"Dispatching next round · {n} finding(s) so far" if n else "Dispatching research workers"
     if node == "collect_node":
         round_ = update.get("research_rounds", "?")
-        nxt = "moving to review" if update.get("next_agent") == "critic" else "another research pass"
+        nxt = "moving to verification" if update.get("next_agent") == "verifier" else "another research pass"
         return f"Round {round_} complete → {nxt}"
     if node == "document_pass_node":
         return "Preparing document extraction"
@@ -270,7 +270,7 @@ def _stop_body_html(node: str, entries: list[dict]) -> str:
             f"<ol>{items}</ol></details>"
         )
 
-    if node in ("worker_node", "document_worker_node", "researcher"):
+    if node in ("worker_node", "document_worker_node", "paper_worker_node"):
         findings = [f for e in entries for f in ((e or {}).get("findings") or [])]
         count_line = f"<strong>{len(findings)}</strong> finding(s) produced"
         if len(entries) > 1:
@@ -291,10 +291,10 @@ def _stop_body_html(node: str, entries: list[dict]) -> str:
             f"<details><summary>View findings</summary>{rows}</details>"
         )
 
-    if node == "critic":
+    if node == "verifier":
         critiques = [c for e in entries for c in ((e or {}).get("critiques") or [])]
         if not critiques:
-            return '<p class="rs-muted">0 critique(s) produced</p>'
+            return '<p class="rs-muted">0 finding(s) verified</p>'
         rows = "".join(
             f'<div class="rs-finding">'
             f'<p>{_verdict_badge(str(_field(c, "verdict", "")))} '
@@ -304,25 +304,8 @@ def _stop_body_html(node: str, entries: list[dict]) -> str:
             for c in critiques
         )
         return (
-            f'<p class="rs-muted"><strong>{len(critiques)}</strong> critique(s) produced</p>'
-            f"<details><summary>View critiques</summary>{rows}</details>"
-        )
-
-    if node == "fact_checker":
-        findings = [f for e in entries for f in ((e or {}).get("findings") or [])]
-        if not findings:
-            return '<p class="rs-muted">0 finding(s) fact-checked</p>'
-        rows = "".join(
-            f'<div class="rs-finding">'
-            f'<p class="rs-finding-q">{_esc(_field(f, "sub_question"))}</p>'
-            f'<p class="rs-muted rs-small">{float(_field(f, "confidence", 0)):.2f} confidence</p>'
-            f'<div class="rs-bar"><div class="rs-bar-fill" style="width:{float(_field(f, "confidence", 0)) * 100:.0f}%"></div></div>'
-            f"</div>"
-            for f in findings
-        )
-        return (
-            f'<p class="rs-muted"><strong>{len(findings)}</strong> finding(s) fact-checked</p>'
-            f"<details><summary>Updated confidence scores</summary>{rows}</details>"
+            f'<p class="rs-muted"><strong>{len(critiques)}</strong> finding(s) verified</p>'
+            f"<details><summary>View verdicts</summary>{rows}</details>"
         )
 
     if node == "writer":

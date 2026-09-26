@@ -12,8 +12,8 @@ short_description: Multi-agent LangGraph research assistant with live trace
 
 # Research Swarm
 
-Autonomous multi-agent research: a LangGraph swarm plans, researches, critiques, fact-checks, and
-writes a cited report on any topic you give it — with a live view of every agent in the pipeline
+Evidence-first research: a LangGraph pipeline frames the question, plans sub-questions, searches
+the literature, extracts quoted facts, verifies them, and writes a cited report — with a live view of every agent in the pipeline
 and a human-in-the-loop checkpoint before the final write-up.
 
 ## Setup
@@ -42,8 +42,8 @@ materially better structured-output reliability than the project's original defa
 Recommended Space **variables**:
 - `DATA_DIR=/tmp/research_swarm_space` — the container's disk is ephemeral; keep checkpoints there.
 - `SPACE_MODE=true` — enables session pruning and a concurrency cap so one Space process handling
-  several simultaneous visitors doesn't run out of memory (each run holds embedding models on top
-  of its LLM calls). See `research_swarm/config.py`'s `space_*` settings.
+  several simultaneous visitors doesn't run out of memory (each run holds its search results and
+  in-flight LLM calls). See `research_swarm/config.py`'s `space_*` settings.
 
 ## What's different from the chatbot template
 

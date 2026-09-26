@@ -6,7 +6,7 @@ cd /d "%~dp0"
 
 echo.
 echo  ================================================================
-echo   Research Swarm  ^|  LangGraph + LlamaIndex + Streamlit
+echo   Research Swarm  ^|  LangGraph + Streamlit
 echo  ================================================================
 echo.
 
