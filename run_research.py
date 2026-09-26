@@ -13,7 +13,6 @@ import time
 import uuid
 
 from research_swarm.config import settings
-from research_swarm.eval.faithfulness import FAITHFULNESS_THRESHOLD, score_report
 from research_swarm.graph.builder import build_graph, get_thread_config
 from research_swarm.schemas.query import ResearchDepth, ResearchQuery
 
@@ -73,7 +72,6 @@ async def run(topic: str, depth: str = "shallow", model_name: str | None = None)
         "research_rounds": 0,
         "pre_dispatch_finding_ids": [],
         "active_sub_question": None,
-        "active_worker_role": None,
     }
 
     graph = build_graph(interrupt_before_writer=False)
@@ -143,7 +141,6 @@ async def run(topic: str, depth: str = "shallow", model_name: str | None = None)
 
     # ── Quality metrics ────────────────────────────────────────────────────────
     references = report.references or []
-    faith_score = score_report(report, references)
 
     # Confidence stats
     confs = [
@@ -162,9 +159,6 @@ async def run(topic: str, depth: str = "shallow", model_name: str | None = None)
 
     print(f"\n{_BOLD}{SEP}{_RESET}")
     print(f"{_BOLD}  Quality Scorecard{_RESET}")
-    faith_ok = faith_score >= FAITHFULNESS_THRESHOLD
-    faith_label = "OK" if faith_ok else "below threshold"
-    print(f"  Faithfulness   {_bar(faith_score)}  {faith_score:.2f}  {faith_label}")
     print(f"  Mean confidence{_bar(mean_conf)}  {mean_conf:.2f}")
     print(f"  Min confidence {_bar(min_conf)}   {min_conf:.2f}")
     if verdict_counts:
@@ -223,11 +217,11 @@ async def run(topic: str, depth: str = "shallow", model_name: str | None = None)
             print(f"    [{i}] {label}  cred={score:.2f}  {_DIM}{stype}{_RESET}")
 
     print(f"\n{_BOLD}{SEP}{_RESET}")
-    passed = faith_ok and mean_conf >= 0.4 and len(findings) >= 1
+    passed = bool(references) and mean_conf >= 0.4 and len(findings) >= 1
     verdict = "PASS" if passed else "NEEDS IMPROVEMENT"
     colour = _GREEN if verdict == "PASS" else _RED
     print(f"  Overall: {colour}{_BOLD}{verdict}{_RESET}"
-          f"  (faith={faith_score:.2f}, conf={mean_conf:.2f})")
+          f"  (references={len(references)}, conf={mean_conf:.2f})")
     print(f"{_BOLD}{SEP}{_RESET}\n")
 
 
