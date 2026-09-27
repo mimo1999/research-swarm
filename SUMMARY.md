@@ -1,5 +1,7 @@
 # Research Swarm — Development Summary
 
+> **Historical document.** This log describes an earlier version of the system. That version used a LlamaIndex/ChromaDB retrieval stack, a reranker, and critic / fact-checker / ReAct-worker agents, all since removed. For the current architecture see [README.md](README.md), [TECHNICAL_HANDOFF.md](TECHNICAL_HANDOFF.md) and [CLAUDE.md](CLAUDE.md).
+
 ## Project Overview
 
 **Research Swarm** is a production-grade autonomous research system built on LangGraph, LlamaIndex, and Streamlit. It orchestrates a swarm of AI agents to autonomously plan, research (live web/arXiv/PubMed search *and* directly-ingested documents), critique, fact-check, and write structured reports on any topic — with optional human review.

@@ -1,108 +1,167 @@
 # Multi-Agent Research Swarm
 
-A LangGraph-based autonomous research system. Give it a topic; a swarm of specialised AI agents researches it, critiques the findings, fact-checks every claim, and writes a structured report - with optional human review before the final draft.
+A LangGraph research pipeline. Give it a question and it:
+- works out what the question is really asking;
+- plans sub-questions;
+- searches PubMed, Europe PMC, arXiv and the web;
+- extracts facts with verbatim quotes and locates each quote in its source;
+- verifies every fact against that evidence;
+- writes a report whose every sentence is tied to the facts it rests on.
+
+A human can review the findings before the report is written.
 
 **Live demo:** [huggingface.co/spaces/maitreya18/research-swarm](https://huggingface.co/spaces/maitreya18/research-swarm)
 
-Built with **LangGraph 1.2**, **LlamaIndex**, **ChromaDB**, and **Streamlit**.
+Built with **LangGraph 1.2** and **Streamlit**. A FastAPI backend, a Next.js UI and a Gradio Space app are also included.
+
+**Design stance:**
+- **Evidence first.** An LLM call is spent only on judgments that need language understanding. Everything that can be checked in code is checked in code: quote location, citation numbering, scope, strict-claim wording and duplicates.
+- **Local first.** Research runs on a small local model (`gemma4:e2b` via Ollama). A larger model (`nemotron-3-nano:30b-cloud` on Ollama Cloud by default) guards only the planner and the writer. It can be removed with one setting on a bigger GPU.
 
 ---
 
 ## Architecture
 
 ```
-START → supervisor (plan + complexity score)
+START → supervisor   probe search of the literal question (no LLM)
+                     → question frame (1 call: key constraint, its phrasings, confusable topics,
+                       strict terms, proof criterion, items to compare, search queries)
+                     → plan (1 call: sub-questions + per-sub-question search query & domain)
+                     → frame enforced on the plan in code (count cap, constraint re-attached)
           ↓
-        document_pass_node ──► document_worker_node × N  (one-time, per ingested doc)
-          ↓ (bounces straight through when nothing was uploaded)
-        dispatch_node ──► worker_node × N  (parallel via Send, live web/arXiv/PubMed/Europe PMC)
-          ↑                    ↓
-          └── re-research  collect_node (stop-signal check + evidence persisted to RAG)
-                                ↓
-                          critic ──┐
-                          ↑        ↓ (weak/refuted, under rework cap)
-                          └── dispatch_node
-                                ↓
-                          fact_checker → writer (+ optional LLM judge) → END
+        document_pass_node ─┬─► document_worker_node × B   uploaded PDFs/URLs, packed into
+                            │                               ~12k-char batches, 1 extraction call each
+                            └─► paper_scout_node           search all routed tools (wide net) →
+          ↓ (both converge)                                 code pre-filter → light-LLM 0–10 scorer
+        paper_worker_node   deep read of the top 2 arXiv papers' full text (no LLM),
+                            then 1 extraction call per sub-question over the kept abstracts
+          ↓
+        dispatch_node ──► worker_node × N   gap fill: search → fetch → 1 extraction call, only for
+          ↑                    ↓             sub-questions without enough grounded, on-scope facts
+          └────────── collect_node
+                          ↓
+                       verifier   1 call per ≤10 facts; enum verdicts + relevance,
+                          ↓       applied by a fixed policy in code
+                       writer     outline → sections one at a time → comparison table →
+                          ↑       review → code render (citations, scope and claim checks) → END
+               (HITL pause before the writer, if enabled)
 ```
 
-**Phase 4 additions:** `dispatch_node` fans out to N parallel workers via LangGraph `Send`, one per sub-question. Each worker carries a role (`academic / industry / skeptic / benchmark / general`) chosen by the supervisor. `collect_node` decides whether to stop (marginal-gain threshold or hard round cap) or dispatch another pass. All non-LLM routing is deterministic - the supervisor LLM is called only once for plan creation.
+**Stages**
 
-**Document pass:** user-uploaded PDFs/URLs no longer go through chunk+embed+retrieve. `document_pass_node` fans out one single-shot extraction worker per document (or per size-bounded slice of an oversized one, split at sentence boundaries) before round-0 dispatch, producing ordinary `Finding`s the same way live research does. `_research_targets`'s round-0 check skips any sub-question a document already answered, so web workers don't duplicate that work. `retrieve_from_rag` still exists, but now only surfaces evidence discovered by *earlier rounds of the same session* (persisted by `collect_node` after every round) — not uploaded documents.
+| Stage | What it does |
+|---|---|
+| **Question frame** (`agents/expansion.py`) | Extracts, once, what separates the question from its general subject: for example "*across different LLMs*" in a question about KV-cache transfer. Every later stage enforces that constraint in code, so a small planner that drops it can no longer derail the run into an adjacent topic. |
+| **Supervisor** (`agents/supervisor.py`) | Writes the plan: a fixed number of sub-questions per depth (6 / 8 / 10), each with a keyword search query and a domain. Code caps the count and re-attaches the constraint to any sub-question or query that lost it. |
+| **Paper scout** (`agents/papers.py`) | Searches every sub-question concurrently, pooling up to 48 candidates per sub-question. The frame's queries and probe hits are added to every pool. A code pre-filter (word overlap, scope match, primary sources over secondary) narrows the pool to 24. A light LLM then scores each against its sub-question; a paper that misses the scope scores at most 4. No embeddings, no vector store. |
+| **Deep read** (`agents/deep_read.py`) | Fetches the full text of the top 2 primary arXiv papers, keeps the ~6,000 characters that best match the question, and appends them to the abstract, so a paper's specifics come from the paper and not from blogs summarising it. |
+| **Extractor** (`agents/extractor.py`) + **grounding** (`agents/grounding.py`) | One call turns a batch of sources into facts, each with a verbatim quote and a relevance label (`direct` / `background`). The quote is located in its source (exact, then fuzzy), and the surrounding sentences become the fact's evidence. A fact whose quote cannot be found is refuted without an LLM call. |
+| **Gap fill** (`agents/gap_fill.py`) | Runs only for sub-questions still lacking a grounded, on-scope, non-background fact: search → fetch the top pages → one extraction call. |
+| **Verifier** (`agents/verifier.py`) | Gives each fact a `supported` / `partial` / `unsupported` verdict and a relevance label (`direct` / `background` / `off_topic`) against its evidence. A fixed policy table in code turns the verdicts into critiques. |
+| **Writer** (`agents/writer.py`, `writer_sections.py`, `writer_render.py`) | Runs in these steps: 1. an outline call assigns each fact to one section; 2. evidence sections, then synthesis, then the overview are written one at a time, each seeing the sections before it; 3. an optional comparison-table call; 4. a review call rules on every sentence with strong wording and fixes or deletes unsupported sentences; 5. code renders the report: numbers citations, drops sentences whose citations don't back them, and removes duplicates, markup and invented attributions. |
 
-**Rework loop:** `critic` can route weak/refuted findings back to `dispatch_node` for targeted re-research, capped by `max_rework_attempts` independently of the overall round cap, so one chronically-bad finding can't hog rounds that would otherwise go to others.
+**Report shapes by audience:**
+- **Academic:** Abstract / Previous Work / Experiments / Discussion.
+- **Technical:** Use Case / Problem Statement / Proposed Solutions / Conclusion.
+- **General:** article-style headings.
+- **Executive:** a single paragraph.
 
-**Budget:** LLM calls are split into two independent pools (`runtime/budget.py`) — a **research** pool covering the document pass and the dispatch/worker loop (the part that can genuinely run away across rounds and tool turns), and a smaller **review** pool covering critic/fact-checker/writer/judge (a few batched calls each). A research-loop overrun degrades gracefully instead of starving the review stage — the writer always runs on whatever findings exist, rather than the whole session producing an empty report.
+Every report ends with a reference list generated in code, plus methodology and limitations. Sub-questions the evidence did not answer are listed as gaps rather than filled with nearby material.
 
-**State** (`AgentState`) threads through every node as a single `TypedDict`. Custom reducers: `findings` merges by id (fact-checker overwrites in-place); `critiques` appends; `next_agent` tolerates concurrent same-value writes from parallel Send-fanned branches (e.g. several workers hitting an exhausted budget in the same step) instead of crashing.
+**Strict claims:** questions such as "is it *lossless*?" or "is it *exactly* equivalent?" carry a proof criterion. An answer that asserts the strict term is removed unless a cited fact states it. Accuracy numbers, "negligible loss" and variance explained do not count as proof.
+
+**State:** `AgentState` (`schemas/state.py`) is a single `TypedDict`:
+- `findings` merges by id;
+- `critiques` is append-only;
+- `next_agent` tolerates concurrent identical writes from Send-fanned branches.
+
+The SQLite checkpoints are migrated forward on load (`runtime/migrations.py`).
+
+[CLAUDE.md](CLAUDE.md) holds the detailed design notes, and [TECHNICAL_HANDOFF.md](TECHNICAL_HANDOFF.md) is the engineer's reference.
 
 ---
 
 ## Quick Start
 
-**Requirements:** Python 3.11–3.14, [Poetry](https://python-poetry.org/docs/#installation), at least one LLM API key. Tavily is optional (enables general web search; arXiv/PubMed/Europe PMC work without it).
+**Requirements:**
+- Python 3.11–3.14 and [Poetry](https://python-poetry.org/docs/#installation).
+- [Ollama](https://ollama.com) running locally with `gemma4:e2b` pulled.
+- An Ollama Cloud API key (`OLLAMA_API_KEY`) for the default large model. This is optional: set `LARGE_MODEL=` to run everything locally.
+
+Tavily is also optional; arXiv, PubMed and Europe PMC need no key.
 
 ```bash
 git clone <repo-url> && cd swarm_agent_project
-cp .env.example .env          # fill in API keys
+cp .env.example .env          # set OLLAMA_API_KEY (and optionally TAVILY / Anthropic / OpenAI keys)
+ollama pull gemma4:e2b
 poetry install
 poetry run streamlit run app.py
 # → http://localhost:8501
 ```
 
-Windows: double-click `start.bat` - checks deps, optionally starts Ollama, opens the browser.
+On Windows, double-click `start.bat`. It checks the dependencies, optionally starts Ollama and opens the browser.
+
+**Headless run:**
+
+```bash
+poetry run python run_research.py "your question here"
+```
+
+**REST API:**
+
+```bash
+poetry run uvicorn api.main:app
+```
+
+The endpoints are:
+- `/api/research`: start a run, stream it over SSE, check its status, resume it with approve / edit / discard;
+- `/api/sessions`;
+- `/api/config`.
 
 ---
 
-## Deploy to Hugging Face Spaces
+## Timing and cost
 
-This repo's README carries the frontmatter block (`sdk: streamlit`, `app_file: app.py`) a Spaces build reads directly — pushing this repo to a new Space is enough to build it, once the following are set:
+Research runs locally. Measured on one consumer GPU, gemma4:e2b takes about 24 s per scoring call and about 33 s per extraction call, or about 55 s of model time per sub-question. Two requests share the GPU.
 
-**Space secrets** (Settings → Repository secrets) — the process defaults below assume a local Ollama daemon, which does not exist inside a Space container, so every provider field needs an explicit override:
+A **shallow** run (6 sub-questions) takes **about 4–8 minutes** end to end. The large model is used for query expansion, planning and the writer's calls: about 10 cloud calls of 2–4 s each.
 
-```ini
-ANTHROPIC_API_KEY=...             # or OPENAI_API_KEY
-TAVILY_API_KEY=...                # optional — enables general web search
-DEFAULT_MODEL_PROVIDER=anthropic  # or openai — never ollama on a Space
-TIER_FAST_PROVIDER=anthropic
-TIER_STANDARD_PROVIDER=anthropic
-TIER_THOROUGH_PROVIDER=anthropic
-```
-
-`TIER_STANDARD_PROVIDER` also gets overridden per-session by whatever provider is selected in the sidebar (see `get_tiered_llm`'s worker-tier override) — but `TIER_FAST_PROVIDER`/`TIER_THOROUGH_PROVIDER` (critic/fact-checker and supervisor/writer) do **not** follow the UI selection, so they must be set explicitly or those nodes will still try to reach `localhost:11434` and fail on a Space.
-
-**Space variables** (Settings → Variables, non-secret) — Spaces storage is ephemeral, so proactive cleanup replaces the "click delete" a hosted single-user server doesn't get:
-
-```ini
-DATA_DIR=/tmp/research_swarm_space
-SPACE_MODE=true
-SPACE_RETENTION_SECONDS=21600      # 6h — sessions older than this are pruned at startup
-SPACE_MAX_SESSIONS=40              # oldest-first cap beyond retention
-SPACE_MAX_CONCURRENT_RUNS=4        # in-process cap on simultaneous graph runs
-```
-
-`SPACE_MODE=true` is what turns on both the startup session-pruning pass (`app.py::_prune_sessions_once`) and the concurrency cap (`app.py::_RUN_SEMAPHORE`) — both are no-ops otherwise, so a local `poetry run streamlit run app.py` is unaffected by any of this.
-
-If the Space's build doesn't use Poetry, `requirements.txt` at the repo root (hand-maintained in parallel with `pyproject.toml`'s dependency list) covers a plain `pip install -r requirements.txt`.
+`sub_questions_by_depth` is the main compute knob. Search is cheap, so it casts a wide net and narrows it in code before any LLM reads a candidate.
 
 ---
 
 ## Configuration
 
+Key settings are shown below; `.env.example` and `research_swarm/config.py` have the full list.
+
 ```ini
-# .env - key settings (see .env.example for full list)
-ANTHROPIC_API_KEY=...          # or OPENAI_API_KEY / leave blank for Ollama
-TAVILY_API_KEY=...             # optional — enables general web search
-DEFAULT_MODEL_PROVIDER=anthropic  # anthropic | openai | ollama
-DEFAULT_MODEL_NAME=claude-sonnet-4-6
-DEFAULT_DEPTH=standard          # shallow | standard | deep
-MAX_ITERATIONS=10
-MAX_SOURCES=15
-MAX_LLM_CALLS=25               # hard budget per session
+DEFAULT_MODEL_PROVIDER=ollama          # anthropic | openai | ollama
+DEFAULT_MODEL_NAME=gemma4:e2b
 OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_API_KEY=...                     # for the large model on Ollama Cloud
+
+LARGE_MODEL=nemotron-3-nano:30b-cloud  # "" = every stage uses the local tiers
+LARGE_MODEL_OLLAMA_BASE_URL=https://ollama.com
+LARGE_MODEL_STAGES=["supervisor","writer"]
+WRITER_MODE=sectioned                  # sectioned | single
+
+SUB_QUESTIONS_BY_DEPTH={"shallow":6,"standard":8,"deep":10}
+QUERY_EXPANSION_ENABLED=true           # false = no question frame (plan exactly as asked)
+DEEP_READ_PAPERS=2                     # 0 = abstracts only
+TAVILY_API_KEY=...                     # optional general web search
+LANGSMITH_API_KEY=...                  # optional LangSmith tracing
 ```
 
-All settings are overridable from the sidebar at runtime.
+The sidebar sets these per run:
+- provider and model;
+- depth and max sources;
+- the HITL toggle;
+- the LLM-judge toggle;
+- document upload.
+
+The Audience dropdown sits next to the question box.
+
+**Running without the cloud:** on a GPU that serves a bigger local model, set `LARGE_MODEL=` and point the `TIER_*_MODEL` settings at the bigger model. Alternatively, set `LARGE_MODEL` to a local tag with `LARGE_MODEL_OLLAMA_BASE_URL=`.
 
 ---
 
@@ -112,24 +171,15 @@ All settings are overridable from the sidebar at runtime.
 
 ![Report tab - executive summary, sections with inline citations, and reference list](docs/screenshots/06_report_top.png)
 
-1. Enter a topic, select audience + depth, optionally upload PDFs/URLs (extracted directly into findings, no separate vector search step).
-2. Click **Start Research** - live agent trace streams as the swarm works.
-3. If HITL is on, approve findings before the Writer runs.
-4. Switch to **Report** to read, copy, or download. Past sessions live in **Sessions**.
+1. Enter a question, pick the audience and depth, and optionally upload PDFs or URLs. Uploads go straight to extraction and skip search.
+2. Click **Start Research**. A live trace and topology diagram show each stage as it runs: the current node is amber and visited nodes are green. The supervisor card shows the question frame the run is working from.
+3. The run is a background job, so changing sidebar settings mid-run doesn't interrupt it; the changes apply to the next run. **Cancel run** stops it.
+4. If HITL is on, review the findings:
+   - **Approve & Write** runs the writer, with optional instructions.
+   - **Edit & Re-research** sends the weakly answered sub-questions back through gap fill with your keywords, then pauses again before the writer.
+5. Read, copy or download the report (Markdown or HTML) in **Report**. Past sessions are listed in **Sessions**.
 
----
-
-## Agents
-
-| Agent | Role |
-|---|---|
-| **Supervisor** | Creates the research plan: an *exact* sub-question count per depth (not a ceiling — an unenforced "at most N" let the model under-decompose comparison topics), worker-role assignments, and a complexity score. Explicitly required to cover every side of a "X vs Y"-style topic, not just one. Only LLM-invoked once per session. |
-| **Document workers** (×N) | One single-shot extraction pass per ingested document (or per size-bounded slice of an oversized one) before live research starts — no chunking, no retrieval, the model sees the full text. |
-| **Workers** (×N) | Parallel ReAct tool loops over web/arXiv/PubMed/Europe PMC search - each researches one sub-question with a role-specific strategy (academic, industry, skeptic, benchmark, or general), routing to the tool that actually covers the sub-question's domain. Europe PMC also serves full-text XML for open-access biomedical papers, not just abstracts. |
-| **Critic** | Reviews findings in batches (one LLM call per `judge_batch_size` findings, run concurrently): `supported / weak / refuted`. Weak/refuted findings trigger another dispatch round, capped both by the overall round limit and a per-finding `max_rework_attempts`. |
-| **Fact-Checker** | Cross-checks claims against source snippets; adjusts confidence scores. Evidence-backed findings are floored at 0.15 so a mis-calibrated model can't zero out a claim that has real sources. |
-| **Writer** | Synthesises validated findings into a structured report, citing each source precisely rather than attaching a finding's whole source list to every sentence derived from it. Runs a per-section faithfulness check and rewrites only the sections that fall below threshold. |
-| **LLM Judge** *(optional)* | An independent LLM review pass over the finished report — catches what embedding similarity can't (wrong topic, an unaddressed sub-question, a citation to a reference that doesn't exist). |
+When LangSmith is configured, each run links to its LangSmith trace. Every stage, LLM call and tool call is also traced locally to `data/traces/<session>.jsonl`.
 
 ---
 
@@ -137,50 +187,38 @@ All settings are overridable from the sidebar at runtime.
 
 | Feature | Detail |
 |---|---|
-| **Dual budget pools** | LLM calls split into a **research** pool (document/web workers — the part that can genuinely run away across rounds) and a smaller **review** pool (critic/fact-checker/writer/judge). A research-loop overrun degrades gracefully instead of starving the review stage of the budget it needs to produce a real report. |
-| **JSON-repair recovery** | Structured-output failures caused by unescaped backslashes (e.g. raw LaTeX in a claim breaking `json.loads`) are repaired and reparsed instead of discarding a real, already-generated answer. |
-| **Cross-encoder reranker** | `bge-reranker-base` (CPU, 280 MB) reranks RAG chunks by relevance before returning to the researcher. |
-| **Faithfulness check** | BGE embeddings score each report section against its cited snippets; sections scoring below threshold get a targeted rewrite, retried up to 3 times (re-scoring and re-targeting only sections still weak each pass) before the writer moves on. |
-| **SSRF protection** | URL fetcher validates every hop against a private-IP blocklist; fetched content is sanitised for prompt-injection patterns. |
-| **Schema migration** | `migrate_state()` upgrades v0/v1 checkpoints to the current schema on resume - no manual DB work needed. |
-
----
-
-## Retrieval Quality (BEIR)
-
-RAG retrieval evaluated on three [BEIR](https://github.com/beir-cellar/beir) datasets (seed 42, 100 queries each, last rerun 2026-08-23). Metric: **nDCG@10**.
-
-| Dataset | BM25 ¹ | Contriever ¹ | BGE-Large ¹ | **Ours (BGE-small, dense)** | **Ours (+ reranker)** |
-|---|---|---|---|---|---|
-| SciFact | 0.678 | 0.677 | 0.752 | **0.749** | **0.755** |
-| NFCorpus | 0.321 | 0.328 | 0.381 | **0.341** | **0.350** |
-| ArguAna | 0.397 | 0.446 | 0.416 | 0.391 | 0.391 |
-
-¹ Published baselines from the [BEIR paper](https://arxiv.org/abs/2104.08663) and [Resources for Brewing BEIR](https://arxiv.org/abs/2306.07471). BGE-Large is `bge-large-en-v1.5`; our embedder is the much smaller `bge-small-en-v1.5` (~130 MB vs ~1.3 GB).
-
-The cross-encoder reranker (`bge-reranker-base`, swapped in from `ms-marco-MiniLM-L-6-v2`) is guarded: skipped for queries longer than 8 words (most scientific queries) to avoid out-of-distribution degradation. It never regresses nDCG@10 versus dense retrieval alone across the three BEIR sets, but is markedly slower on CPU than the smaller ms-marco model it replaced and loses to it on NFCorpus's short keyword queries. See [`benchmarks/README.md`](benchmarks/README.md) for the full per-dataset breakdown, reranker latency comparison, and the reasoning behind the model choice.
+| **Scope enforcement** | The question frame's constraint is enforced in code at planning, scoring, coverage, verification and writing. A report says "No retrieved source directly addresses …" instead of answering an adjacent question. |
+| **Claim-level attribution** | The model tags each sentence with the fact numbers it rests on, and code attaches the citations. A sentence is dropped if it cites facts that don't back it, contains numbers absent from its evidence, or names the scope or a strict term its facts don't mention. |
+| **Primary sources first** | arXiv mirrors are merged into one reference. Secondary sources (blogs, Medium, LinkedIn, and so on) are ranked below papers and trimmed from citations when a primary source covers the claim. |
+| **LLM concurrency and retry** | Each provider has a process-wide cap on in-flight requests (the local daemon and Ollama Cloud have separate pools). Calls retry transient errors (429, 5xx, timeouts) with jittered backoff. Thinking is turned off for structured-JSON stages. |
+| **Budget pools** | LLM calls are split into a research pool and a review pool, with a session-wide token cap, so a research overrun can't leave the writer with nothing. |
+| **Structured-output recovery** | JSON is repaired for unescaped LaTeX backslashes and for schema-echo replies. A stage falls back when it fails; each fallback is logged at ERROR and traced as `<stage>.fallback`. |
+| **SSRF / injection** | The URL fetcher validates every redirect hop against private IP ranges. Fetched text is scanned for prompt-injection patterns. |
+| **Schema migration** | Old checkpoints are upgraded on resume. |
 
 ---
 
 ## Development
 
 ```bash
-# Run all 349 tests (fully offline - all LLMs mocked)
-poetry run pytest
-
-# Specific test file
-poetry run pytest tests/unit/test_graph.py -v
-
-# Golden regression set (3 topics, full pipeline)
-poetry run pytest tests/golden/ -v
-
-# Lint / type-check
+poetry run pytest                  # 254 tests, fully offline (all LLMs mocked)
+poetry run pytest tests/unit/test_writer_render.py -x -q
 poetry run ruff check .
 poetry run mypy research_swarm/
-
-# Run a live research job without Streamlit
-poetry run python run_research.py "your topic here"
 ```
+
+The tests run with query expansion off, the single-call writer, no large model and no deep read (`tests/conftest.py`), because those paths make live searches. The sectioned writer, expansion and deep read are covered by their own mocked tests.
+
+Benchmarks and ablations live in `benchmarks/` (see [benchmarks/README.md](benchmarks/README.md)): a closed-corpus answer-quality benchmark (ALCE / HotpotQA / SciFact), a relevance-scorer benchmark and a live-question review harness (`benchmarks/quality_review/`). Sample reports from live runs are in `reports/`.
+
+---
+
+## Deployment
+
+- **Docker** (`Dockerfile`): Streamlit on port 8501, with `SPACE_MODE=true` and `DATA_DIR=/tmp/research_swarm_space`.
+- **Hugging Face Space** (`hf_space/`): a Gradio app that runs against Ollama Cloud directly. See [hf_space/README.md](hf_space/README.md).
+- `SPACE_MODE=true` turns on startup session pruning (`SPACE_RETENTION_SECONDS`, `SPACE_MAX_SESSIONS`) and a cap on concurrent runs (`SPACE_MAX_CONCURRENT_RUNS`). Without it these are no-ops.
+- A container has no local Ollama daemon, so set every `TIER_*_PROVIDER` explicitly (anthropic / openai), or point `OLLAMA_BASE_URL` at `https://ollama.com` with `OLLAMA_API_KEY`.
 
 ---
 
@@ -188,11 +226,8 @@ poetry run python run_research.py "your topic here"
 
 | Provider | Requires | Notes |
 |---|---|---|
-| `anthropic` | `ANTHROPIC_API_KEY` | Claude Haiku (fast tier) / Sonnet (standard) / Opus (thorough). |
-| `openai` | `OPENAI_API_KEY` | GPT-4o-mini / GPT-4o. |
-| `ollama` | Ollama running locally | No API key. `start.bat` auto-starts `ollama serve`. Default: `gemma4:31b-cloud` (best grounding + faithfulness). |
+| `ollama` | Ollama running locally | Default. Research stages run on `gemma4:e2b`. Cloud models go through `ollama login` on the daemon, or directly to `https://ollama.com` with `OLLAMA_API_KEY` (the large-model path). |
+| `anthropic` | `ANTHROPIC_API_KEY` | Claude models on every tier. |
+| `openai` | `OPENAI_API_KEY` | GPT models on every tier. |
 
-**Note:** general web search (Tavily) is optional, not required to run this project. Workers and the
-fetch pass fall back to arXiv, PubMed, and Europe PMC — all keyless — when `TAVILY_API_KEY` isn't
-set. Set it as an environment variable (`.env` locally, or a Space secret when deployed) only if you
-want general web-page results in addition to those three sources.
+General web search (Tavily) is optional. Without `TAVILY_API_KEY`, search uses arXiv, PubMed and Europe PMC, which need no key.
