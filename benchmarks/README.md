@@ -194,6 +194,21 @@ rationale sentences -- no LLM judge. Answers and the converted results: `data/ha
 | Pipeline, gemma4:e2b local (quote required) | 0.40 (12/30) | 10/10, 0/10, 2/10 | 9 | 0.262 / 0.810 / 0.395 | 4.4 |
 | Single agent, Claude Haiku 4.5 | **0.80 (24/30)** | 7/10, 9/10, 8/10 | 1 | **0.682 / 0.714 / 0.698** | 0.7 |
 | Pipeline, planner + writer on `gemma4:31b-cloud`, rest local (run `140728`) | 0.77 (23/30) | 7/10, 8/10, 8/10 | 1 | 0.286 / 0.810 / 0.422 | 3.9 |
+| **Packet path** (`pipeline_mode=packet`, synthesis on `gemma4:31b-cloud`, run `153311`) | **0.80 (24/30)** | 7/10, 8/10, 9/10 | **0** | 0.264 / 0.905 / 0.409 | 1.3 |
+
+**Packet path, milestone 1 (2026-09-28, run `smoke-20260928-153311`; design in `CONTEXT.md`).**
+Supplied sources become an evidence packet of numbered sentences (all 30 fit the 2k shallow
+budget whole, so no screening ran), read by one synthesis call on `gemma4:31b-cloud` that cites
+sentence IDs; code render audits it. One LLM call per task, 1,435 in + 561 out tokens (vs 7.2k on
+the large model for the fact chain; 0.84k for the Haiku single call, which writes no report),
+p50 6.4 s, no fallbacks, no errors. Paired verdicts: vs the fact chain 2 vs 1, vs Haiku 2 vs 2,
+vs all-local 15 vs 3. Evidence precision is unchanged and low (the model cites 10-18 sentences
+per report; recall 0.91): selection is the next thing to tighten. A first run (`152659`) scored
+0.57 because of two adapter bugs, both fixed with tests: an insufficient-evidence answer citing
+nothing was treated as an empty render and replaced by a facts dump (7 tasks, 6 of them
+correct), and a valid reply inside a ```json fence was lost ("completion null"; now parsed from
+the raw text). Per CONTEXT.md this meets the replacement bar (large-model tokens below 2k per
+task, accuracy within noise of the fact chain) -- by a hair on tokens (1,996), on 30 tasks.
 
 **Large model on the planner and writer (2026-09-28, run `smoke-20260928-140728`, the new default
 `large_model=gemma4:31b-cloud`, `writer_mode=single`).** The claim-verdict labelling runs on the
