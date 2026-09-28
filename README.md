@@ -22,30 +22,7 @@ Built with **LangGraph 1.2** and **Streamlit**. A FastAPI backend, a Next.js UI 
 
 ## Architecture
 
-```
-START → supervisor   probe search of the literal question (no LLM)
-                     → question frame (1 call: key constraint, its phrasings, confusable topics,
-                       strict terms, proof criterion, items to compare, search queries)
-                     → plan (1 call: sub-questions + per-sub-question search query & domain)
-                     → frame enforced on the plan in code (count cap, constraint re-attached)
-          ↓
-        document_pass_node ─┬─► document_worker_node × B   uploaded PDFs/URLs, packed into
-                            │                               ~12k-char batches, 1 extraction call each
-                            └─► paper_scout_node           search all routed tools (wide net) →
-          ↓ (both converge)                                 code pre-filter → light-LLM 0–10 scorer
-        paper_worker_node   deep read of the top 1-3 arXiv papers' full text (no LLM),
-                            then 1 extraction call per sub-question over the kept abstracts
-          ↓
-        dispatch_node ──► worker_node × N   gap fill: search → fetch → 1 extraction call, only for
-          ↑                    ↓             sub-questions without enough grounded, on-scope facts
-          └────────── collect_node
-                          ↓
-                       verifier   1 call per ≤10 facts; enum verdicts + relevance,
-                          ↓       applied by a fixed policy in code
-                       writer     outline → sections one at a time → comparison table →
-                          ↑       review → code render (citations, scope and claim checks) → END
-               (HITL pause before the writer, if enabled)
-```
+![Fact-chain pipeline: supervisor plans, document/paper workers extract facts, gap fill runs for thin sub-questions, the verifier checks each fact, and the writer renders a cited report](docs/architecture.svg)
 
 **Stages**
 

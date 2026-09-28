@@ -1,0 +1,115 @@
+<svg viewBox="0 0 900 1200" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="900" height="1200" fill="#ffffff"/>
+
+  <!-- START -->
+  <ellipse cx="450" cy="28" rx="58" ry="22" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="450" y="33" text-anchor="middle" font-size="14" font-weight="600" fill="#111827">START</text>
+  <line x1="450" y1="50" x2="450" y2="72" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- supervisor -->
+  <rect x="255" y="72" width="390" height="112" rx="10" fill="#dbeafe" stroke="#2563eb" stroke-width="1.5"/>
+  <text x="450" y="94" text-anchor="middle" font-size="15" font-weight="700" fill="#1e3a8a">supervisor</text>
+  <text x="450" y="114" text-anchor="middle" font-size="11.5" fill="#1e40af">probe search of the literal question (no LLM)</text>
+  <text x="450" y="131" text-anchor="middle" font-size="11.5" fill="#1e40af">question frame: constraint, phrasings, strict terms, search queries</text>
+  <text x="450" y="148" text-anchor="middle" font-size="11.5" fill="#1e40af">plan: sub-questions + per-sub-question search query &amp; domain</text>
+  <text x="450" y="165" text-anchor="middle" font-size="11.5" fill="#1e40af">frame enforced on the plan in code (count cap, constraint re-attached)</text>
+  <line x1="450" y1="184" x2="450" y2="206" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- document_pass_node -->
+  <rect x="280" y="206" width="340" height="58" rx="9" fill="#ccfbf1" stroke="#0d9488" stroke-width="1.5"/>
+  <text x="450" y="240" text-anchor="middle" font-size="14" font-weight="700" fill="#0f766e">document_pass_node</text>
+
+  <!-- split lines -->
+  <line x1="450" y1="264" x2="450" y2="280" stroke="#475569" stroke-width="1.5"/>
+  <line x1="205" y1="280" x2="695" y2="280" stroke="#475569" stroke-width="1.5"/>
+  <line x1="205" y1="280" x2="205" y2="300" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="695" y1="280" x2="695" y2="300" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- document_worker_node -->
+  <rect x="45" y="300" width="320" height="82" rx="9" fill="#ecfeff" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="205" y="326" text-anchor="middle" font-size="13.5" font-weight="700" fill="#0e7490">document_worker_node &#215; B</text>
+  <text x="205" y="346" text-anchor="middle" font-size="11" fill="#155e75">uploaded PDFs / URLs, packed into</text>
+  <text x="205" y="362" text-anchor="middle" font-size="11" fill="#155e75">~12k-char batches, 1 extraction call each</text>
+
+  <!-- paper_scout_node -->
+  <rect x="535" y="300" width="320" height="82" rx="9" fill="#ecfeff" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="695" y="326" text-anchor="middle" font-size="13.5" font-weight="700" fill="#0e7490">paper_scout_node</text>
+  <text x="695" y="346" text-anchor="middle" font-size="11" fill="#155e75">search all routed tools (wide net) &#8594;</text>
+  <text x="695" y="362" text-anchor="middle" font-size="11" fill="#155e75">code pre-filter &#8594; light-LLM 0&#8211;10 scorer</text>
+
+  <!-- converge into paper_worker_node -->
+  <line x1="205" y1="382" x2="205" y2="404" stroke="#475569" stroke-width="1.5"/>
+  <line x1="695" y1="382" x2="695" y2="404" stroke="#475569" stroke-width="1.5"/>
+  <line x1="205" y1="404" x2="695" y2="404" stroke="#475569" stroke-width="1.5"/>
+  <line x1="450" y1="404" x2="450" y2="420" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="450" y="398" text-anchor="middle" font-size="10.5" fill="#64748b" font-style="italic">(both converge)</text>
+
+  <!-- paper_worker_node -->
+  <rect x="245" y="420" width="410" height="86" rx="9" fill="#ccfbf1" stroke="#0d9488" stroke-width="1.5"/>
+  <text x="450" y="446" text-anchor="middle" font-size="14" font-weight="700" fill="#0f766e">paper_worker_node</text>
+  <text x="450" y="466" text-anchor="middle" font-size="11.5" fill="#0f766e">deep read of the top 1&#8211;3 arXiv papers' full text (no LLM),</text>
+  <text x="450" y="483" text-anchor="middle" font-size="11.5" fill="#0f766e">then 1 extraction call per sub-question over the kept abstracts</text>
+  <line x1="450" y1="506" x2="450" y2="528" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- dispatch_node / worker_node loop -->
+  <rect x="255" y="528" width="220" height="64" rx="9" fill="#ccfbf1" stroke="#0d9488" stroke-width="1.5"/>
+  <text x="365" y="565" text-anchor="middle" font-size="14" font-weight="700" fill="#0f766e">dispatch_node</text>
+
+  <rect x="565" y="528" width="290" height="64" rx="9" fill="#ecfeff" stroke="#0891b2" stroke-width="1.5"/>
+  <text x="710" y="554" text-anchor="middle" font-size="13.5" font-weight="700" fill="#0e7490">worker_node &#215; N</text>
+  <text x="710" y="573" text-anchor="middle" font-size="10.5" fill="#155e75">gap fill: search &#8594; fetch &#8594; 1 extraction call</text>
+
+  <line x1="475" y1="550" x2="557" y2="550" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="516" y="542" text-anchor="middle" font-size="10" fill="#64748b" font-style="italic">only sub-qs still thin</text>
+
+  <!-- collect_node -->
+  <rect x="255" y="632" width="220" height="60" rx="9" fill="#ccfbf1" stroke="#0d9488" stroke-width="1.5"/>
+  <text x="365" y="667" text-anchor="middle" font-size="14" font-weight="700" fill="#0f766e">collect_node</text>
+
+  <line x1="710" y1="592" x2="710" y2="662" stroke="#475569" stroke-width="1.5"/>
+  <line x1="710" y1="662" x2="477" y2="662" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- loop back arrow, collect_node -> dispatch_node -->
+  <path d="M 255 652 C 190 652 190 558 253 558" fill="none" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="150" y="608" text-anchor="middle" font-size="10" fill="#64748b" font-style="italic" transform="rotate(-90 150 608)">next round</text>
+
+  <line x1="365" y1="692" x2="365" y2="712" stroke="#475569" stroke-width="1.5"/>
+  <line x1="365" y1="712" x2="450" y2="712" stroke="#475569" stroke-width="1.5"/>
+  <line x1="450" y1="712" x2="450" y2="726" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- verifier -->
+  <rect x="255" y="726" width="390" height="78" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+  <text x="450" y="754" text-anchor="middle" font-size="15" font-weight="700" fill="#92400e">verifier</text>
+  <text x="450" y="774" text-anchor="middle" font-size="11.5" fill="#92400e">1 call per &#8804;10 facts; enum verdicts + relevance,</text>
+  <text x="450" y="791" text-anchor="middle" font-size="11.5" fill="#92400e">applied by a fixed policy in code</text>
+  <line x1="450" y1="804" x2="450" y2="826" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- HITL note -->
+  <rect x="670" y="826" width="205" height="52" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.3" stroke-dasharray="5,4"/>
+  <text x="772" y="847" text-anchor="middle" font-size="11" fill="#6b7280">HITL pause before</text>
+  <text x="772" y="863" text-anchor="middle" font-size="11" fill="#6b7280">the writer, if enabled</text>
+  <line x1="670" y1="852" x2="648" y2="852" stroke="#9ca3af" stroke-width="1.3" stroke-dasharray="4,3"/>
+
+  <!-- writer -->
+  <rect x="215" y="826" width="435" height="166" rx="10" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5"/>
+  <text x="432" y="852" text-anchor="middle" font-size="15" font-weight="700" fill="#5b21b6">writer</text>
+  <text x="432" y="874" text-anchor="middle" font-size="11.5" fill="#5b21b6">outline (assign facts to sections)</text>
+  <text x="432" y="893" text-anchor="middle" font-size="11.5" fill="#5b21b6">&#8594; sections written one at a time</text>
+  <text x="432" y="912" text-anchor="middle" font-size="11.5" fill="#5b21b6">&#8594; optional comparison table</text>
+  <text x="432" y="931" text-anchor="middle" font-size="11.5" fill="#5b21b6">&#8594; review call (fixes / drops unsupported sentences)</text>
+  <text x="432" y="950" text-anchor="middle" font-size="11.5" fill="#5b21b6">&#8594; code render: citations, scope &amp; claim checks</text>
+  <line x1="432" y1="960" x2="432" y2="960" stroke="none"/>
+  <text x="432" y="975" text-anchor="middle" font-size="10.5" fill="#7c3aed" font-style="italic">agents/writer.py, writer_sections.py, writer_render.py</text>
+
+  <line x1="432" y1="992" x2="432" y2="1014" stroke="#475569" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- END -->
+  <ellipse cx="432" cy="1038" rx="50" ry="22" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.5"/>
+  <text x="432" y="1043" text-anchor="middle" font-size="14" font-weight="600" fill="#111827">END</text>
+</svg>
