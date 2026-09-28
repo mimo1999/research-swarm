@@ -89,3 +89,13 @@ class TestComputeTaskMetrics:
         assert m["answer_findings"] == 2                       # f1 and f2 mention Paris
         assert m["false_refuted"] == 1                         # f1 (latest verdict: refuted)
         assert m["writer_dropped"] == 2                        # f1 refuted, f2 confidence < 0.1
+
+
+def test_findings_payload_keeps_the_located_quote():
+    from research_swarm.schemas import Finding, Source
+
+    f = Finding(claim="c", sub_question="q", grounding="quote", quote="exact source text",
+                evidence=[Source(url="benchmark://t1/0", title="A", snippet="...")])
+    findings, _ = smoke._findings_payload({"findings": [f], "critiques": []})
+    assert findings[0]["quote"] == "exact source text"
+    assert findings[0]["grounding"] == "quote"

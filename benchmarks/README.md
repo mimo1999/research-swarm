@@ -124,6 +124,116 @@ export --claims <smoke-run>-claims.jsonl` writes ~40 stratified sentences to a C
 score` reports agreement and Cohen's kappa, and Table A replaces its "not validated" warning with
 the measured kappa.
 
+### SciFact rationale scoring (grounding, no judge)
+
+SciFact marks, for every labelled claim, which sentences of which abstract carry the evidence.
+Every fact the pipeline extracts keeps the exact source text it rests on (`Finding.quote`: the
+model's quote as located in the source, or the matched passage), and the smoke benchmark records
+it per fact (`finding_details[].quote`, `.grounding`). `score_rationales.py` maps each quote back
+to sentence indices of its abstract and scores them against the gold rationale sentences:
+
+```powershell
+poetry run python benchmarks/score_rationales.py --results data/benchmark_results/smoke-<ts>-results.jsonl
+```
+
+It reports micro precision / recall / F1 over (abstract, sentence) pairs, with a task-level
+bootstrap CI, for three fact sets: every extracted fact, facts whose quote was located verbatim,
+and facts the verifier kept for the writer. Two reference points on the same tasks frame the
+numbers: selecting every sentence of the supplied abstracts (recall 1, precision = the base rate)
+and selecting as many sentences as the pipeline did at random (the expected score of a selector
+that ignores the claim). It also reports the task hit rate (claims with evidence where at least
+one gold sentence was selected), quotes that could not be mapped, and sentences selected on
+NOT_ENOUGH_INFO claims (every one is a false positive). This is SciFact's sentence-selection
+metric without its label condition: facts are not labelled SUPPORT / CONTRADICT themselves.
+Deterministic, no LLM judge. Runs from before `Finding.quote` existed cannot be scored.
+
+<!-- RATIONALES:START -->
+**First run (2026-09-28): 30 SciFact dev claims (10 per label), every stage on local
+`gemma4:e2b`** (`--set large_model= --set writer_mode=single`; Ollama Cloud was at its monthly
+limit), the same task manifest for both rows, 95% task-bootstrap CIs.
+
+It found a defect on the first tasks: `ExtractedFact.quote` was optional, and schema-constrained
+decoding let gemma4:e2b omit it on **every** fact (0 of 192 facts quote-grounded), so every fact
+fell back to a passage match of up to ~800 characters -- most of a SciFact abstract -- and the
+quote path never ran. The fix lists `quote` as required in the JSON schema the model is
+constrained by (parsing still tolerates a missing quote).
+
+| Fact set | Baseline (quote optional) precision / recall / F1 | Quote required: precision / recall / F1 |
+|---|---|---|
+| extracted | 0.166 / 0.881 / 0.279 | 0.262 / 0.810 / 0.395 |
+| verbatim (quote located) | - / 0.000 / - | 0.311 / 0.762 / 0.441 |
+| kept by the verifier | 0.207 / 0.857 / 0.333 | 0.288 / 0.810 / 0.425 |
+| random, same count as extracted | 0.139 / 0.736 / 0.233 | 0.132 / 0.410 / 0.200 |
+| all sentences | 0.128 / 1.000 / 0.227 | 0.128 / 1.000 / 0.227 |
+
+Paired difference (quote required minus baseline): extracted precision **+0.096 [+0.051,
++0.149]**, F1 **+0.116 [+0.062, +0.172]**, recall -0.071 [-0.200, +0.061] (not significant);
+kept precision +0.081 [+0.025, +0.143], F1 +0.092 [+0.022, +0.155]. Facts grounded by quote:
+0 of 192 -> 184 of 200. Sentences selected on NOT_ENOUGH_INFO claims: 6.5 -> 4.4 per claim.
+Verdict accuracy unchanged (0.40 both; 4 of 30 verdicts changed, 2 each way); LLM calls per
+task 7.4 -> 7.9, p50 187 s both.
+
+Reading: grounding is now well above chance but still loose -- about one selected sentence in
+three or four is gold. Extraction still picks up background sentences, and NOT_ENOUGH_INFO claims
+still attract "evidence". n = 30, so treat these as a first measurement, not a stable estimate.
+<!-- RATIONALES:END -->
+
+### Single-agent comparison: Claude Haiku 4.5 on the same SciFact tasks (2026-09-28)
+
+The same 30 tasks (task manifest `smoke-20260928-101813-tasks.json`), each given to a fresh
+Claude Haiku 4.5 agent (the Agent tool's `haiku` model; no API key was configured) with the
+benchmark's exact prompt and the same supplied abstracts as `[S#]`, no web or other tools, and
+the pipeline's extraction contract: a report whose first line is the verdict, plus evidence
+quotes copied verbatim. Judged with the same deterministic scorers as the pipeline -- the
+benchmark's own verdict parser against the gold label, and `score_rationales.py` against the gold
+rationale sentences -- no LLM judge. Answers and the converted results: `data/haiku_bench/`,
+`data/benchmark_results/haiku-20260928-results.jsonl`.
+
+| System | Verdict accuracy | SUPPORT / CONTRADICT / NEI correct | SUPPORT<->CONTRADICT flips | Rationale P / R / F1 | Sentences picked on NEI claims |
+|---|---|---|---|---|---|
+| Pipeline, gemma4:e2b local (quote required) | 0.40 (12/30) | 10/10, 0/10, 2/10 | 9 | 0.262 / 0.810 / 0.395 | 4.4 |
+| Single agent, Claude Haiku 4.5 | **0.80 (24/30)** | 7/10, 9/10, 8/10 | 1 | **0.682 / 0.714 / 0.698** | 0.7 |
+| Pipeline, planner + writer on `gemma4:31b-cloud`, rest local (run `140728`) | 0.77 (23/30) | 7/10, 8/10, 8/10 | 1 | 0.286 / 0.810 / 0.422 | 3.9 |
+
+**Large model on the planner and writer (2026-09-28, run `smoke-20260928-140728`, the new default
+`large_model=gemma4:31b-cloud`, `writer_mode=single`).** The claim-verdict labelling runs on the
+writer's model, so this moves the stage behind 17 of 18 wrong verdicts to the large model. Verdict
+accuracy 0.40 -> 0.77: right where the all-local run was wrong on 15 tasks, the reverse on 4
+(sign test p ~ 0.02); against Haiku 2 vs 3 (no difference). Evidence precision is unchanged
+(+0.024 [-0.016, +0.067]) because extraction is still local. p50 time 187 s -> 86 s; 3 writer
+fallbacks (6 before), no LLM errors. Tokens per task: 7.2k on the large model (5,766 in + 1,479
+out) + 4.9k local, versus ~0.84k for the single Haiku call -- similar accuracy at roughly 9x the
+large-model tokens, which is the case for the evidence-packet design (one large call reading the
+source sentences) in `CONTEXT.md`.
+
+Paired: Haiku right where the pipeline was wrong on 15 tasks, the reverse on 3 (sign test
+p ~ 0.008). Rationale difference (Haiku minus pipeline): precision +0.420 [+0.292, +0.539],
+F1 +0.302 [+0.172, +0.429], recall -0.095 [-0.286, +0.071] (not significant). 43 of Haiku's 45
+quotes were located verbatim.
+
+**What this does and does not show.**
+- It compares *systems*, not architectures: a frontier-class hosted model against a 2B-effective
+  local one. The architecture question needs a same-model control -- a single agent on
+  gemma4:e2b, or the pipeline on Haiku.
+- The pipeline's accuracy is almost entirely its SUPPORT row: it named SUPPORT on 27 of 30 claims
+  (9 of 10 CONTRADICT, 8 of 10 NOT_ENOUGH_INFO). With gemma4:e2b the claim-verdict stage
+  (`agents/verdict.py`, facts labelled supports / contradicts / unrelated) is heavily biased to
+  "supports"; that is the first thing to fix, whatever the model.
+- **Cost per task (estimate).** Tokens: pipeline 10,680 in + 1,756 out over ~8 calls (exact, from
+  its Ollama traces); Haiku as one direct API call 653 in + 190 out (tiktoken cl100k as a proxy
+  for Claude's tokenizer) -- the pipeline uses ~15x the tokens, mostly the question, JSON schemas
+  and abstracts re-sent to every stage. Per-token compute (forward pass ~2 x active parameters):
+  gemma4:e2b ~2.3B effective -> ~4.6 GFLOP/token; Haiku 4.5's size is not published -- *assuming*
+  20-30B dense-equivalent -> 40-60 GFLOP/token. Per task: pipeline ~57 TFLOP, Haiku ~34-51 TFLOP:
+  **roughly the same compute** -- the 15x token volume cancels the ~9-13x parameter gap. In money:
+  Haiku at list price ($1 / $5 per M in / out) ~$0.0016 per task; the pipeline at a
+  parameter-scaled price (Haiku's x 2.3/25) ~$0.0018, or ~$0.001 of electricity locally (GTX 1650
+  system, ~91 s of wall time per task at concurrency 2). Per *correct* verdict Haiku is ~2x
+  cheaper (0.80 vs 0.40 accuracy). Through the agent harness Haiku actually consumed ~52k tokens
+  per task (~49k of it the harness's own prompt), which is how it was run here, not how it would
+  be deployed.
+- SciFact (2020) may be partly memorised by Haiku; a no-evidence control was not run. n = 30.
+
 ### BEIR retrieval benchmark (removed)
 
 `run_beir_smoke.py` / `run_beir_reranker_compare.py` benchmarked the embedding retriever and

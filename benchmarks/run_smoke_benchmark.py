@@ -406,6 +406,8 @@ def _findings_payload(state: dict[str, Any]) -> tuple[list[dict], list[dict]]:
         {
             "id": f.id, "sub_question": f.sub_question, "claim": f.claim,
             "confidence": f.confidence, "evidence_urls": [e.url for e in f.evidence],
+            # the located source text, scored against gold rationales by score_rationales.py
+            "grounding": getattr(f, "grounding", "unknown"), "quote": getattr(f, "quote", ""),
         }
         for f in state.get("findings") or []
     ]
@@ -751,6 +753,14 @@ async def main(args: argparse.Namespace) -> None:
 
     settings.enable_fetch_pass = False
     nodes._get_gap_fill_sources = _corpus_gap_sources
+    # Query expansion's probe is a live web search of the question; a closed-corpus task must
+    # not see anything but its own documents, so the frame is built from the question alone.
+    import research_swarm.agents.supervisor as supervisor
+
+    async def _no_probe(*_args, **_kwargs):
+        return []
+
+    supervisor.probe = _no_probe
 
     # get_tiered_llm now auto-picks a cheaper model for the "standard" (worker)
     # tier in production, which defeats a uniform-model comparison run. Replace
