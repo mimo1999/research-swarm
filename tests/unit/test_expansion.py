@@ -223,7 +223,7 @@ async def test_run_supervisor_puts_the_frame_in_the_planner_prompt_and_on_the_pl
     llm = _llm_returning(decision)
     state = _make_state(plan=None, query=ResearchQuery(topic=KV_TOPIC, depth=ResearchDepth.shallow))
     with patch.object(settings, "query_expansion_enabled", True), \
-         patch.object(settings, "sub_questions_by_depth", {"shallow": 1}), \
+         patch.object(settings, "depth_profiles", {"shallow": {"sub_questions": 1}}), \
          patch.object(expansion, "probe", AsyncMock(return_value=[])), \
          patch("research_swarm.agents.supervisor.probe", AsyncMock(return_value=[])), \
          patch("research_swarm.agents.supervisor.expand_question",

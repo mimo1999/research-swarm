@@ -392,11 +392,14 @@ def select_topk(
     return [{**c, "score": sc} for sc, _i, c in ranked if sc >= floor][:k]
 
 
-def choose_papers(candidates: list[dict], scores: dict[int, float]) -> list[dict]:
-    """The scout's selection rule for one scored pool: the best ``paper_max_per_sub_question``
-    papers scoring at least ``paper_topk_floor``."""
+def choose_papers(candidates: list[dict], scores: dict[int, float],
+                  k: int | None = None) -> list[dict]:
+    """The scout's selection rule for one scored pool: the best *k* (default
+    ``paper_max_per_sub_question``; the scout passes its depth's value) papers scoring at least
+    ``paper_topk_floor``."""
     return select_topk(
-        candidates, scores, settings.paper_max_per_sub_question, settings.paper_topk_floor,
+        candidates, scores, k if k is not None else settings.paper_max_per_sub_question,
+        settings.paper_topk_floor,
     )
 
 

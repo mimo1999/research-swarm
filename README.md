@@ -33,7 +33,7 @@ START → supervisor   probe search of the literal question (no LLM)
                             │                               ~12k-char batches, 1 extraction call each
                             └─► paper_scout_node           search all routed tools (wide net) →
           ↓ (both converge)                                 code pre-filter → light-LLM 0–10 scorer
-        paper_worker_node   deep read of the top 2 arXiv papers' full text (no LLM),
+        paper_worker_node   deep read of the top 1-3 arXiv papers' full text (no LLM),
                             then 1 extraction call per sub-question over the kept abstracts
           ↓
         dispatch_node ──► worker_node × N   gap fill: search → fetch → 1 extraction call, only for
@@ -52,9 +52,9 @@ START → supervisor   probe search of the literal question (no LLM)
 | Stage | What it does |
 |---|---|
 | **Question frame** (`agents/expansion.py`) | Extracts, once, what separates the question from its general subject: for example "*across different LLMs*" in a question about KV-cache transfer. Every later stage enforces that constraint in code, so a small planner that drops it can no longer derail the run into an adjacent topic. |
-| **Supervisor** (`agents/supervisor.py`) | Writes the plan: a fixed number of sub-questions per depth (6 / 8 / 10), each with a keyword search query and a domain. Code caps the count and re-attaches the constraint to any sub-question or query that lost it. |
+| **Supervisor** (`agents/supervisor.py`) | Writes the plan: a fixed number of sub-questions per depth (3 / 5 / 7), each with a keyword search query and a domain. Code caps the count and re-attaches the constraint to any sub-question or query that lost it. |
 | **Paper scout** (`agents/papers.py`) | Searches every sub-question concurrently, pooling up to 48 candidates per sub-question. The frame's queries and probe hits are added to every pool. A code pre-filter (word overlap, scope match, primary sources over secondary) narrows the pool to 24. A light LLM then scores each against its sub-question; a paper that misses the scope scores at most 4. No embeddings, no vector store. |
-| **Deep read** (`agents/deep_read.py`) | Fetches the full text of the top 2 primary arXiv papers, keeps the ~6,000 characters that best match the question, and appends them to the abstract, so a paper's specifics come from the paper and not from blogs summarising it. |
+| **Deep read** (`agents/deep_read.py`) | Fetches the full text of the top primary arXiv papers (1 / 2 / 3 by depth), keeps the ~6,000 characters that best match the question, and appends them to the abstract, so a paper's specifics come from the paper and not from blogs summarising it. |
 | **Extractor** (`agents/extractor.py`) + **grounding** (`agents/grounding.py`) | One call turns a batch of sources into facts, each with a verbatim quote and a relevance label (`direct` / `background`). The quote is located in its source (exact, then fuzzy), and the surrounding sentences become the fact's evidence. A fact whose quote cannot be found is refuted without an LLM call. |
 | **Gap fill** (`agents/gap_fill.py`) | Runs only for sub-questions still lacking a grounded, on-scope, non-background fact: search → fetch the top pages → one extraction call. |
 | **Verifier** (`agents/verifier.py`) | Gives each fact a `supported` / `partial` / `unsupported` verdict and a relevance label (`direct` / `background` / `off_topic`) against its evidence. A fixed policy table in code turns the verdicts into critiques. |
@@ -124,9 +124,20 @@ The endpoints are:
 
 Research runs locally. Measured on one consumer GPU, gemma4:e2b takes about 24 s per scoring call and about 33 s per extraction call, or about 55 s of model time per sub-question. Two requests share the GPU.
 
-A **shallow** run (6 sub-questions) takes **about 4–8 minutes** end to end. The large model is used for query expansion, planning and the writer's calls: about 10 cloud calls of 2–4 s each.
+Everything that scales with the chosen depth lives in one setting, `depth_profiles`, and is not exposed in the UI:
 
-`sub_questions_by_depth` is the main compute knob. Search is cheap, so it casts a wide net and narrows it in code before any LLM reads a candidate.
+| Per depth | shallow | standard | deep |
+|---|---|---|---|
+| Sub-questions | 3 | 5 | 7 |
+| Gap-fill workers per round (least-covered first) | 2 | 3 | 5 |
+| Gap-fill rounds (max) | 1 | 2 | 3 |
+| Candidates gathered per sub-question (search, no LLM) | 32 | 48 | 64 |
+| Candidates the scorer reads per sub-question | 16 | 24 | 32 |
+| Papers kept per sub-question | 4 | 6 | 8 |
+| Papers read in full text | 1 | 2 | 3 |
+| Facts sent to the writer (sub-questions x 6) | 18 | 30 | 42 |
+
+Sub-questions are the main cost. A shallow run of 6 sub-questions measured 4–8 minutes end to end; with 3, shallow should take roughly 2.5–4 minutes, standard 4–6 and deep 6–9 (estimates, not yet measured). The large model is used for query expansion, planning and the writer's calls: about 10 cloud calls of 2–4 s each. Search is cheap, so it casts a wide net and narrows it in code before any LLM reads a candidate.
 
 ---
 
@@ -145,7 +156,7 @@ LARGE_MODEL_OLLAMA_BASE_URL=https://ollama.com
 LARGE_MODEL_STAGES=["supervisor","writer"]
 WRITER_MODE=sectioned                  # sectioned | single
 
-SUB_QUESTIONS_BY_DEPTH={"shallow":6,"standard":8,"deep":10}
+DEPTH_PROFILES={"shallow":{"sub_questions":3,...},...}   # per-depth scale (see above)
 QUERY_EXPANSION_ENABLED=true           # false = no question frame (plan exactly as asked)
 DEEP_READ_PAPERS=2                     # 0 = abstracts only
 TAVILY_API_KEY=...                     # optional general web search
@@ -154,7 +165,7 @@ LANGSMITH_API_KEY=...                  # optional LangSmith tracing
 
 The sidebar sets these per run:
 - provider and model;
-- depth and max sources;
+- depth;
 - the HITL toggle;
 - the LLM-judge toggle;
 - document upload.

@@ -23,14 +23,14 @@ A LangGraph **state machine** that turns a research question into a cited report
 
 The LLM stages are fixed pipelines with bounded call counts, not agent loops:
 
-| Stage | Calls per run (shallow, 6 sub-questions) | Model (default) |
+| Stage | Calls per run (shallow, 3 sub-questions) | Model (default) |
 |---|---|---|
 | Question frame (query expansion) | 1 | large (`nemotron-3-nano:30b-cloud`) |
 | Plan | 1 | large |
 | Paper relevance scoring | 1 per sub-question | local fast tier (`gemma4:e2b`) |
 | Document extraction | 1 per ~12k-char batch of uploads | local standard tier |
 | Paper extraction | 1 per sub-question | local standard tier |
-| Gap fill | 1 per under-covered sub-question | local standard tier |
+| Gap fill | 1 per under-covered sub-question, at most 2 / 3 / 5 per round by depth | local standard tier |
 | Verifier | 1 per ≤10 facts | local fast tier |
 | Writer | outline + one per section + table + review (~7–9) | large |
 | LLM judge (optional, off) | 1 | fast tier |
@@ -192,16 +192,16 @@ Both Send-returning routers get an explicit `path_map`. It is not needed for rou
      - drops confusable topics that match the scope itself;
      - drops a proof criterion when there are no strict terms.
   3. **Plan call.**
-  4. **`_enforce_plan`:** caps the plan at `sub_questions_by_depth[depth]` and appends the constraint to any sub-question or query that lost it. The supervisor's `next_agent` is forced by code.
+  4. **`_enforce_plan`:** caps the plan at the depth's `sub_questions` (3 / 5 / 7) and appends the constraint to any sub-question or query that lost it. The supervisor's `next_agent` is forced by code.
 - **`route_from_document_pass`**: packs `ingested_documents` into `extract_batch_chars` batches (one `document_worker_node` each) and sends one `paper_scout_node` carrying all the scout tasks plus the frame.
 - **`paper_scout_node`**, per sub-question:
   1. Searches its routed tools concurrently, getting `fetch_pass_results_per_tool` (12) results per tool.
   2. Adds the frame's `search_queries` results and the probe hits to every pool.
   3. Dedupes by `paper_key`, which merges arXiv / alphaxiv / emergentmind mirrors.
-  4. Interleaves round-robin up to `paper_prefilter_pool` (48).
-  5. Narrows the pool in code to `paper_max_candidates` (24) with `prefilter_candidates`.
+  4. Interleaves round-robin up to `paper_prefilter_pool` (32 / 48 / 64 by depth).
+  5. Narrows the pool in code to `paper_max_candidates` (16 / 24 / 32) with `prefilter_candidates`.
   6. Scores the survivors 0–10 in one call against that sub-question, with the scope in the prompt.
-  7. Keeps the top `paper_max_per_sub_question` papers scoring ≥ `paper_topk_floor`. A sub-question that keeps no non-web paper retries the tools its routing skipped.
+  7. Keeps the top `paper_max_per_sub_question` (4 / 6 / 8) papers scoring ≥ `paper_topk_floor`. A sub-question that keeps no non-web paper retries the tools its routing skipped.
 - **`paper_worker_node`**: calls `deep_read` (§5.3), then makes one extraction call per sub-question over its kept papers, passing `scope=frame.key_constraint`.
 - **`dispatch_node` / `route_from_dispatch`**: take the targets from `_research_targets` (§4.3) and send one `worker_node` (gap fill) per target, or bounce to `collect_node`.
 - **`worker_node`**: runs `run_gap_fill` in five steps:
@@ -210,7 +210,7 @@ Both Send-returning routers get an explicit `path_map`. It is not needed for rou
   3. fetch the top pages (12 s timeout, falling back to the snippet);
   4. keep each page's two most relevant passages;
   5. make one extraction call.
-- **`collect_node`**: increments `research_rounds`, clears `rework_instructions`, and runs `should_stop` (hard round cap `max_research_rounds_*` = 1/3/4, or novelty < 0.15).
+- **`collect_node`**: increments `research_rounds`, clears `rework_instructions`, and runs `should_stop` (hard round cap `research_rounds` = 1 / 2 / 3 by depth, or novelty < 0.15).
 - **`verifier_node`**: `run_verifier` (§5.5).
 - **`writer_node`**: `run_attributed_writer` (§5.6), plus the optional LLM judge. The writer is never budget-gated; only the judge is.
 
@@ -249,7 +249,7 @@ Later rounds target sub-questions with no finding at all. While `rework_instruct
 
 ### 5.3 Deep read (`agents/deep_read.py`)
 
-The deep read takes the top `deep_read_papers` (2) primary arXiv papers in the corpus:
+The deep read takes the top `deep_read_papers` (1 / 2 / 3 by depth) primary arXiv papers in the corpus:
 1. It fetches each paper's arXiv HTML through the SSRF-validated `url_fetcher._safe_get`.
 2. It splits the text into paragraphs, using `alttext` for math.
 3. It keeps the paragraphs that best match the question and frame, up to `deep_read_chars` (6000).
@@ -275,7 +275,7 @@ One call per ≤10 facts, returning an enum verdict and a relevance label per fa
 | unsupported, quote located verbatim | weak (hedged, not hidden) | 0.3 |
 | unsupported | refuted (hidden from the writer) | 0.1 |
 
-`_checked_relevance` stops the verifier from downgrading a fact whose own claim states the scope; a 2B verifier had called cross-model facts "background". Facts beyond `max_facts_for_writer` (36) are dropped, best-grounded first. For claim-check questions, `verdict.py` labels each fact supports / contradicts / unrelated, and the verdict is aggregated in code.
+`_checked_relevance` stops the verifier from downgrading a fact whose own claim states the scope; a 2B verifier had called cross-model facts "background". Facts beyond `max_facts_for_writer` (18 / 30 / 42 by depth) are dropped, best-grounded first. For claim-check questions, `verdict.py` labels each fact supports / contradicts / unrelated, and the verdict is aggregated in code.
 
 ### 5.6 Writer (`agents/writer.py`, `writer_sections.py`, `writer_render.py`)
 
@@ -350,18 +350,32 @@ If rendering is empty or parsing fails, the free-form writer runs, grounded by `
 
 ## 9. Configuration (`config.py`)
 
-A `pydantic-settings` singleton loaded from `.env`. The UI's `_apply_ui_settings()` overwrites the provider, model, max sources and Ollama URL before each run. The main knobs:
+A `pydantic-settings` singleton loaded from `.env`. The UI's `_apply_ui_settings()` overwrites the provider, model and Ollama URL before each run.
+
+**Per-depth values** live in `depth_profiles`. A key there overrides the global setting of the same name for runs at that depth; a run without a depth uses the globals. They are not exposed in the UI. The old "Max sources" slider fed `query.max_sources`, which no stage read, so it was removed; the field stays in the schema so API clients still validate.
+
+| Per depth | shallow | standard | deep |
+|---|---|---|---|
+| Sub-questions | 3 | 5 | 7 |
+| Gap-fill workers per round (least-covered first) | 2 | 3 | 5 |
+| Gap-fill rounds (max) | 1 | 2 | 3 |
+| Candidates gathered per sub-question (search, no LLM) | 32 | 48 | 64 |
+| Candidates the scorer reads per sub-question | 16 | 24 | 32 |
+| Papers kept per sub-question | 4 | 6 | 8 |
+| Papers read in full text | 1 | 2 | 3 |
+| Facts sent to the writer (sub-questions x 6) | 18 | 30 | 42 |
+
+Other knobs:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `sub_questions_by_depth` | 6 / 8 / 10 | Main compute knob (~55 s of local model time per sub-question) |
 | `large_model`, `large_model_stages` | nemotron-3-nano:30b-cloud, [supervisor, writer] | `""` = all stages local |
 | `writer_mode` | sectioned | or `single` |
 | `query_expansion_enabled`, `probe_results` | true, 8 | Question frame on/off |
 | `fetch_pass_results_per_tool`, `paper_prefilter_pool`, `paper_max_candidates` | 12, 48, 24 | Wide search, narrowed in code before the scorer |
-| `paper_max_per_sub_question`, `paper_topk_floor` | 6, 0.5 | Papers kept per sub-question |
+| `paper_topk_floor` | 0.5 | Minimum score for a kept paper |
 | `deep_read_papers`, `deep_read_chars` | 2, 6000 | Full-text passages |
-| `max_facts_for_writer`, `min_grounded_facts` | 36, 1 | Writer input cap; coverage gate |
+| `min_grounded_facts` | 1 | Coverage gate |
 | `writer_reasoning_section` | false | Uncited "Analysis (reasoning, not from sources)" section |
 | `max_concurrent_llm_calls_{ollama,ollama_cloud,anthropic,openai}` | 2 / 2 / 8 / 8 | LLM slots |
 | `llm_judge_enabled` | false | Optional report judge |
@@ -385,6 +399,6 @@ poetry run mypy research_swarm/
 - **A reference nobody names isn't resolved.** For "the paper" in "audit the claim that the paper proves …", the frame does not work out which paper is meant, and the writer can anchor on a different source. For now, attach the paper as a document or URL.
 - **The review is lenient.** It tends to rule a strong claim supported when it is true of its own source, even if that source is about a different setting. The code-side scope and strict-term checks are the backstop.
 - **Planner drift.** Sub-questions can drift toward definitions for audit-style questions.
-- **Latency.** A shallow run takes about 4–8 minutes on one local GPU. Two concurrent local calls share it, so each call slows to about 40 s.
+- **Latency.** A shallow run of 6 sub-questions measured 4–8 minutes on one local GPU; the 3-sub-question profile has not been timed yet. Two concurrent local calls share it, so each call slows to about 40 s.
 - **Tests don't cover live model behaviour.** The mocked suite checks wiring and the code guardrails; report quality is verified by live runs (`benchmarks/quality_review/`, `reports/`).
 - **HITL pauses only before the writer.**

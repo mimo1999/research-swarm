@@ -203,12 +203,12 @@ class TestCollectNode:
         state = _make_state(
             findings=[f],
             pre_dispatch_finding_ids=[f.id],
-            research_rounds=settings.max_research_rounds_shallow,
+            research_rounds=settings.max_research_rounds("shallow"),
             query=ResearchQuery(topic="test", depth="shallow"),
         )
         result = await collect_node(state)
         assert result["next_agent"] == "verifier"
-        assert result["research_rounds"] == settings.max_research_rounds_shallow + 1
+        assert result["research_rounds"] == settings.max_research_rounds("shallow") + 1
 
 
 # ---------------------------------------------------------------------------

@@ -185,7 +185,8 @@ async def run_verifier(
     if not findings:
         return [], [], []
 
-    kept, capped = cap_findings(findings, settings.max_facts_for_writer)
+    kept, capped = cap_findings(
+        findings, settings.for_depth("max_facts_for_writer", getattr(query, "depth", None)))
     updated: list[Finding] = []
     critiques: list[Critique] = []
     # Over the cap: not refuted (nothing is wrong with them), just kept out of the writer's

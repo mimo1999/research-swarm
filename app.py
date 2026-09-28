@@ -268,7 +268,7 @@ def _ingest_documents(uploaded_pdfs: list, extra_urls: list[str]) -> list[dict]:
 def _apply_ui_settings(ui: dict) -> None:
     """Apply settings that cannot yet be threaded through AgentState.
 
-    model_provider, model_name, and max_sources are already in AgentState so
+    model_provider and model_name are already in AgentState so
     they are NOT mutated here.  Only Ollama infrastructure config (URL,
     deployment mode) is written to settings so that the LLM factory
     always sees the user's current selection consistently.
@@ -601,8 +601,8 @@ def _render_query_form(ui: dict, graph) -> None:
         st.markdown(
             '<div class="rs-hero">'
             "<h1>What should we research?</h1>"
-            "<p>Give it a topic and the swarm plans, researches, critiques, "
-            "fact-checks, and writes a cited report.</p>"
+            "<p>Give it a question and the swarm plans sub-questions, searches the literature, "
+            "verifies every fact against its source, and writes a cited report.</p>"
             "</div>",
             unsafe_allow_html=True,
         )
@@ -638,7 +638,6 @@ def _render_query_form(ui: dict, graph) -> None:
     query = ResearchQuery(
         topic=topic.strip(),
         depth=ui["depth"],
-        max_sources=ui["max_sources"],
         audience=audience,
     )
     # Extract full text from user-supplied documents up front -- consumed by
@@ -684,7 +683,7 @@ def main() -> None:
     st.markdown(
         '<div class="rs-header">'
         "<span class=\"rs-header-name\">Multi-Agent Research Swarm</span>"
-        "<span class=\"rs-header-tag\">LangGraph · LlamaIndex · Streamlit</span>"
+        "<span class=\"rs-header-tag\">LangGraph · Streamlit</span>"
         "</div>",
         unsafe_allow_html=True,
     )

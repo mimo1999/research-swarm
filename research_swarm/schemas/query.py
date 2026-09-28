@@ -24,7 +24,8 @@ class ResearchQuery(BaseModel):
         default=15,
         ge=1,
         le=50,
-        description="Maximum number of sources to retrieve",
+        description=("Unused by the pipeline; kept so existing API clients and saved sessions "
+                     "still validate. Source counts scale with depth (settings.depth_profiles)."),
     )
     audience: str = Field(
         default="general",

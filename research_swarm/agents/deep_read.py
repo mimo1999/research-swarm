@@ -82,12 +82,13 @@ def select_passages(paragraphs: list[str], focus: str, budget: int) -> str:
 
 
 async def deep_read(corpus: list[dict[str, Any]], question: str, frame: Any,
-                    session_id: str | None) -> list[dict[str, Any]]:
+                    session_id: str | None, papers: int | None = None) -> list[dict[str, Any]]:
     """*corpus* (the kept papers, one entry per paper per sub-question) with the full-text
-    excerpts of the top primary arXiv papers appended to their abstracts. Entries are copied,
-    never mutated."""
+    excerpts of the top *papers* (default ``settings.deep_read_papers``) primary arXiv papers
+    appended to their abstracts. Entries are copied, never mutated."""
     corpus = [dict(p) for p in corpus]
-    if settings.deep_read_papers <= 0 or not corpus:
+    n_papers = settings.deep_read_papers if papers is None else papers
+    if n_papers <= 0 or not corpus:
         return corpus
     best: dict[str, dict[str, Any]] = {}
     for p in corpus:
@@ -96,7 +97,7 @@ async def deep_read(corpus: list[dict[str, Any]], question: str, frame: Any,
             continue
         if key not in best or p.get("score", 0) > best[key].get("score", 0):
             best[key] = p
-    top = sorted(best, key=lambda k: -float(best[k].get("score", 0)))[:settings.deep_read_papers]
+    top = sorted(best, key=lambda k: -float(best[k].get("score", 0)))[:n_papers]
 
     focus_extra = " ".join(
         [*(getattr(frame, "define_terms", None) or []),

@@ -40,13 +40,13 @@ if TYPE_CHECKING:
 # standard reverted 5 -> 4: raising it (alongside more tool turns per worker)
 # pushed a live run's total LLM-call usage to 49 against a 40 budget. Fewer
 # workers keeps a session's call volume predictable.
-# The counts live in settings.sub_questions_by_depth. Each sub-question costs one relevance-
-# scoring call and one extraction call (plus a gap-fill worker when its coverage is thin): about
-# 55 s of local gemma4 time, ~10 s on the cloud model.
+# The counts live in settings.depth_profiles ("sub_questions"). Each sub-question costs one
+# relevance-scoring call and one extraction call (plus a gap-fill worker when its coverage is
+# thin): about 55 s of local gemma4 time, ~10 s on the cloud model.
 
 
 def _sub_questions_for(depth: str) -> int:
-    return int(settings.sub_questions_by_depth.get(depth, 4))
+    return settings.for_depth("sub_questions", depth)
 
 
 def _build_system_prompt(depth: str = "standard") -> str:

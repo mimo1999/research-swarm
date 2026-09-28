@@ -603,7 +603,7 @@ def _error_outputs(message: str):
 
 async def start_research(
     topic, audience, provider, model, ollama_deployment, ollama_url,
-    anthropic_key, openai_key, depth, max_sources, hitl, files, urls_text,
+    anthropic_key, openai_key, depth, hitl, files, urls_text,
 ):
     _prune_sessions_once()
     if not topic or not topic.strip():
@@ -631,7 +631,7 @@ async def start_research(
     )
 
     query = ResearchQuery(
-        topic=topic.strip(), depth=depth, max_sources=int(max_sources), audience=audience,
+        topic=topic.strip(), depth=depth, audience=audience,
     )
     urls = [u.strip() for u in (urls_text or "").splitlines() if u.strip()]
     ingested_documents = _ingest_documents(files, urls)
@@ -768,7 +768,7 @@ with gr.Blocks(title="Research Swarm") as demo:
     gr.HTML(
         '<div class="rs-header"><span class="rs-mark">RS</span>'
         "<div><h1>Research Swarm</h1>"
-        "<p>Autonomous multi-agent research, built on LangGraph and LlamaIndex.</p></div></div>"
+        "<p>Autonomous multi-agent research, built on LangGraph.</p></div></div>"
     )
 
     error_md = gr.Markdown(visible=False)
@@ -808,9 +808,10 @@ with gr.Blocks(title="Research Swarm") as demo:
             )
             depth = gr.Radio(
                 ["shallow", "standard", "deep"], value="shallow", label="Depth",
-                info="shallow=1 tool call, standard=3, deep=6 (per sub-question)",
+                info="Sub-questions researched: " + ", ".join(
+                    f"{d}={settings.for_depth('sub_questions', d)}"
+                    for d in ("shallow", "standard", "deep")),
             )
-            max_sources = gr.Slider(3, 30, value=settings.max_sources, step=1, label="Max sources")
             hitl = gr.Checkbox(value=True, label="Pause before writing (human-in-the-loop)")
             files = gr.File(label="Documents", file_count="multiple", file_types=[".pdf"], type="filepath")
             urls_text = gr.Textbox(
@@ -852,7 +853,7 @@ with gr.Blocks(title="Research Swarm") as demo:
         start_research,
         inputs=[
             topic, audience, provider, model, ollama_deployment, ollama_url,
-            anthropic_key, openai_key, depth, max_sources, hitl, files, urls_text,
+            anthropic_key, openai_key, depth, hitl, files, urls_text,
         ],
         outputs=_OUTPUTS,
     )

@@ -21,6 +21,10 @@ def _no_query_expansion(monkeypatch):
     monkeypatch.setattr(settings, "large_model", "")
     # The deep read fetches paper full text over the network; test_deep_read.py patches the fetch.
     monkeypatch.setattr(settings, "deep_read_papers", 0)
+    monkeypatch.setattr(settings, "depth_profiles", {
+        depth: {**profile, "deep_read_papers": 0}
+        for depth, profile in settings.depth_profiles.items()
+    })
 
 
 @pytest.fixture(autouse=True)

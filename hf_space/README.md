@@ -51,8 +51,9 @@ on Ollama Cloud, no GPU quota used) or bring their own Anthropic or OpenAI key.
 - `SPACE_LOCAL_MODEL`: the in-process model, default `google/gemma-4-E2B-it`. Set it empty to
   run every stage on Ollama Cloud; the app then keeps only a placeholder `@spaces.GPU` function
   for ZeroGPU's startup check.
-- Optional: `SUB_QUESTIONS_BY_DEPTH={"shallow":4,"standard":6,"deep":8}` to make runs cheaper,
-  and `HF_MAX_BATCH` / `HF_BATCH_WINDOW_S` for batching.
+- Optional: `DEPTH_PROFILES` (the per-depth table in `research_swarm/config.py`: 3 / 5 / 7
+  sub-questions) to make runs cheaper, and `HF_MAX_BATCH` (8, at least the deepest profile's
+  sub-questions, so each stage's calls fit one GPU batch) / `HF_BATCH_WINDOW_S`.
 
 **Deploy.** Copy `hf_space/app.py`, `hf_space/requirements.txt` and this `README.md` to the Space
 repo root, next to the `research_swarm/` package, then push.

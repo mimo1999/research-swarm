@@ -206,20 +206,37 @@ class Settings(BaseSettings):
     # the answer and summary (agents/writer_sections.py). "single": one call for the whole draft.
     writer_mode: str = "sectioned"
 
-    # ── Sub-questions per plan, by depth ─────────────────────────────────────
-    # The main compute knob: each sub-question costs one relevance-scoring and one extraction
-    # call (plus a gap-fill worker if its coverage is thin). Measured on local gemma4: ~24 s
-    # scoring + ~33 s extraction, i.e. ~55 s per sub-question, ~35-40 s of wall time with two
-    # calls in flight. Research is meant to run locally (the cloud large model only guards the
-    # planner and writer, and can be dropped on a bigger GPU); a shallow run of 6 measured 458 s.
-    sub_questions_by_depth: dict[str, int] = {"shallow": 6, "standard": 8, "deep": 10}
-
-    # ── Research-loop limits by depth ────────────────────────────────────────
-    # Maximum dispatch→workers→collect cycles before forcing progression
-    # to the verifier regardless of the stop-signal score.
-    max_research_rounds_shallow:  int = 1
-    max_research_rounds_standard: int = 3
-    max_research_rounds_deep:     int = 4
+    # ── Research depth profiles ──────────────────────────────────────────────
+    # Everything that scales with the depth the user picks, in one place (not exposed in the
+    # UI). A key here overrides the global setting of the same name for runs at that depth; a
+    # run with no depth, or a key a profile omits, uses the global setting.
+    #   sub_questions             -- the main compute knob: each costs one scoring and one
+    #                                extraction call (~55 s of local gemma4 time)
+    #   gap_fill_workers          -- max gap-fill workers per round (least-covered first)
+    #   research_rounds           -- max dispatch -> gap fill -> collect rounds
+    #   paper_prefilter_pool      -- candidates gathered per sub-question (search only, free)
+    #   paper_max_candidates      -- candidates the LLM scorer reads per sub-question
+    #   paper_max_per_sub_question -- papers kept per sub-question for extraction
+    #   deep_read_papers          -- papers whose full text is read
+    #   max_facts_for_writer      -- sub_questions x 6 facts, so no depth drops paid-for evidence
+    depth_profiles: dict[str, dict[str, int]] = {
+        "shallow": {"sub_questions": 3, "gap_fill_workers": 2, "research_rounds": 1,
+                    "paper_prefilter_pool": 32, "paper_max_candidates": 16,
+                    "paper_max_per_sub_question": 4, "deep_read_papers": 1,
+                    "max_facts_for_writer": 18},
+        "standard": {"sub_questions": 5, "gap_fill_workers": 3, "research_rounds": 2,
+                     "paper_prefilter_pool": 48, "paper_max_candidates": 24,
+                     "paper_max_per_sub_question": 6, "deep_read_papers": 2,
+                     "max_facts_for_writer": 30},
+        "deep": {"sub_questions": 7, "gap_fill_workers": 5, "research_rounds": 3,
+                 "paper_prefilter_pool": 64, "paper_max_candidates": 32,
+                 "paper_max_per_sub_question": 8, "deep_read_papers": 3,
+                 "max_facts_for_writer": 42},
+    }
+    # Fallbacks for the profile-only keys (a run with no depth).
+    sub_questions: int = 5
+    research_rounds: int = 2
+    gap_fill_workers: int = 0   # 0 = one worker per under-covered sub-question
 
     # ── Stop-signal thresholds ───────────────────────────────────────────────
     # Fraction of new findings considered novel (below = stop).
@@ -239,9 +256,8 @@ class Settings(BaseSettings):
     # (agents/extractor.py); each fact's evidence is located in its source (agents/grounding.py).
     extract_batch_chars: int = 12_000
     extract_max_facts_per_pair: int = 3
-    # Findings passed to the verifier / writer, best grounded first.
-    # 6 sub-questions x up to 6 facts each (paper_max_findings_per_sub_question).
-    max_facts_for_writer: int = 36
+    # Findings passed to the verifier / writer, best grounded first (per depth: depth_profiles).
+    max_facts_for_writer: int = 30
     # A sub-question with fewer grounded findings than this after the paper/document pass is
     # sent to gap fill (search -> fetch -> one extraction call).
     min_grounded_facts: int = 1
@@ -260,13 +276,15 @@ class Settings(BaseSettings):
     llm_judge_tier: str = "fast"
     llm_judge_pass_threshold: float = 3.5
 
-    def max_research_rounds(self, depth: str) -> int:
-        """Return the research-loop cap for the given depth string."""
-        return {
-            "shallow":  self.max_research_rounds_shallow,
-            "standard": self.max_research_rounds_standard,
-            "deep":     self.max_research_rounds_deep,
-        }.get(depth, self.max_research_rounds_standard)
+    def for_depth(self, key: str, depth: object = None) -> int:
+        """*key* for a run at *depth* (a depth string or ResearchDepth): the depth profile's
+        value, else the global setting of that name."""
+        profile = self.depth_profiles.get(str(getattr(depth, "value", depth) or ""), {})
+        return int(profile[key]) if key in profile else int(getattr(self, key))
+
+    def max_research_rounds(self, depth: object = None) -> int:
+        """The research-loop cap for *depth*."""
+        return self.for_depth("research_rounds", depth)
 
 
 settings = Settings()

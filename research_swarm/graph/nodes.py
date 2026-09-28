@@ -175,12 +175,27 @@ def _counts_as_coverage(finding: Any, frame: Any) -> tuple[bool, str]:
 
 
 def _research_targets(state: AgentState, trace: bool = False) -> list[str]:
-    """Return the sub-questions that still need research this round.
+    """Return the sub-questions that still need research this round, at most the run depth's
+    ``gap_fill_workers`` (least covered first; 0 = no cap).
+
+    Shared by dispatch_node and route_from_dispatch so both agree.
+    """
+    targets = _uncapped_research_targets(state, trace=trace)
+    workers = settings.for_depth("gap_fill_workers", getattr(state.get("query"), "depth", None))
+    if workers <= 0 or len(targets) <= workers:
+        return targets
+    if trace:
+        trace_event(state.get("session_id"), "dispatch.capped", "note",
+                    workers=workers, dropped=[sq[:80] for sq in targets[workers:]])
+    return targets[:workers]
+
+
+def _uncapped_research_targets(state: AgentState, trace: bool = False) -> list[str]:
+    """Every sub-question that still needs research this round, least covered first.
 
     Round 0: every sub-question with fewer than ``settings.min_grounded_facts`` findings that
     count as coverage (``_counts_as_coverage``: grounded, not background, within the question
     frame's scope). Later rounds: sub-questions with no finding at all (a worker that failed).
-    Shared by dispatch_node and route_from_dispatch so both agree.
     """
     plan = state.get("plan")
     if not plan:
@@ -204,6 +219,8 @@ def _research_targets(state: AgentState, trace: bool = False) -> list[str]:
                 covered[key] = covered.get(key, 0) + 1
         need = max(1, settings.min_grounded_facts)
         targets = [sq for sq in plan.sub_questions if covered.get(sq.strip().lower(), 0) < need]
+        # Least covered first, so a worker cap drops the sub-questions that already have some.
+        targets.sort(key=lambda sq: covered.get(sq.strip().lower(), 0))
         for sq in targets if trace else []:
             got = reasons.get(sq.strip().lower(), {})
             if got.get("background") or got.get("scope_miss"):
@@ -440,9 +457,11 @@ async def paper_scout_node(state: AgentState) -> dict[str, Any]:
 
     available = tool_registry()
     per_tool = settings.fetch_pass_results_per_tool
-    cap = settings.paper_max_candidates
+    depth = getattr(query, "depth", None)
+    cap = settings.for_depth("paper_max_candidates", depth)
+    pool_size = settings.for_depth("paper_prefilter_pool", depth)
     threshold = settings.relevance_threshold
-    limit = settings.paper_max_per_sub_question
+    limit = settings.for_depth("paper_max_per_sub_question", depth)
     # The LLM's domain label picks the tools first; keywords in the sub-question/query widen the
     # set so a wrong label cannot keep a health question off PubMed.
     routed = [
@@ -480,7 +499,7 @@ async def paper_scout_node(state: AgentState) -> dict[str, Any]:
             shared["probe"] = list(frame.probe_hits)
         # A wide net from the (cheap) searches, narrowed in code to the `cap` the LLM scorer
         # reads -- more candidates considered at no extra LLM cost.
-        wide = [interleave({**ranked, **shared}, max(cap, settings.paper_prefilter_pool))
+        wide = [interleave({**ranked, **shared}, max(cap, pool_size))
                 for ranked in per_task]
         pools = [
             prefilter_candidates(w, t["sub_question"], t["search_query"], frame, cap)
@@ -492,7 +511,7 @@ async def paper_scout_node(state: AgentState) -> dict[str, Any]:
 
     async def _score_and_keep(j: int, pool: list[dict]) -> tuple[dict[int, float], list[dict]]:
         scores = await score_pool(topic, tasks[j]["sub_question"], pool, llm, frame=frame)
-        return scores, choose_papers(pool, scores)
+        return scores, choose_papers(pool, scores, limit)
 
     results = await asyncio.gather(*(_score_and_keep(j, p) for j, p in enumerate(pools)))
     all_scores = [r[0] for r in results]
@@ -523,7 +542,7 @@ async def paper_scout_node(state: AgentState) -> dict[str, Any]:
                     continue
                 fresh_scores = await score_pool(topic, tasks[j]["sub_question"], fresh, llm,
                                                 frame=frame)
-                merged = kept_by_task[j] + choose_papers(fresh, fresh_scores)
+                merged = kept_by_task[j] + choose_papers(fresh, fresh_scores, limit)
                 kept_by_task[j] = sorted(merged, key=lambda p: -p["score"])[:limit]
                 pools[j] = pools[j] + fresh
 
@@ -592,7 +611,10 @@ async def paper_worker_node(state: AgentState) -> dict[str, Any]:
     from research_swarm.agents.deep_read import deep_read
 
     with timed(session_id, "paper_worker", "step", name="deep_read"):
-        corpus = await deep_read(corpus, topic, getattr(plan, "frame", None), session_id)
+        corpus = await deep_read(
+            corpus, topic, getattr(plan, "frame", None), session_id,
+            papers=settings.for_depth("deep_read_papers",
+                                      getattr(state.get("query"), "depth", None)))
 
     from research_swarm.agents.papers import extract_findings
 

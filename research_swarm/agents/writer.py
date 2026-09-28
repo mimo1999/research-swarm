@@ -406,7 +406,7 @@ def _is_secondary(finding: Any) -> bool:
 
 def _select_facts(state: AgentState) -> tuple[list, dict[str, str]]:
     """Writer-eligible findings (not refuted, confidence >= 0.1), sub-question order then
-    confidence, at most ``settings.max_facts_for_writer``; plus each one's latest verdict."""
+    confidence, at most the run depth's ``max_facts_for_writer``; plus each one's latest verdict."""
     from research_swarm.config import settings
 
     findings = state.get("findings") or []
@@ -424,8 +424,10 @@ def _select_facts(state: AgentState) -> tuple[list, dict[str, str]]:
         _is_secondary(f),                     # primary sources first within a sub-question
         -float(_field(f, "confidence", 0.5)),
     ))
-    if settings.max_facts_for_writer > 0:
-        eligible = eligible[: settings.max_facts_for_writer]
+    query = state.get("query")
+    cap = settings.for_depth("max_facts_for_writer", getattr(query, "depth", None))
+    if cap > 0:
+        eligible = eligible[:cap]
     return eligible, verdicts
 
 

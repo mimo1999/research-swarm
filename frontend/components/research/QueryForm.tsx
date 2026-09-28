@@ -12,7 +12,6 @@ import { Button } from "@/components/ui/button";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
-import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Card, CardContent } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -320,23 +319,6 @@ export function QueryForm({
                           </div>
                         ))}
                       </RadioGroup>
-                    </FormItem>
-                  )}
-                />
-
-                <FormField
-                  control={form.control}
-                  name="maxSources"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Max sources: {field.value}</FormLabel>
-                      <Slider
-                        min={3}
-                        max={30}
-                        step={1}
-                        value={[field.value]}
-                        onValueChange={([v]) => field.onChange(v)}
-                      />
                     </FormItem>
                   )}
                 />

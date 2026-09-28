@@ -18,7 +18,7 @@ _OLLAMA_CLOUD_MODELS = [
 
 def _depth_label(depth: ResearchDepth) -> str:
     """The depth option's label, from the live settings so it can't drift from them."""
-    n = settings.sub_questions_by_depth.get(depth.value, 4)
+    n = settings.for_depth("sub_questions", depth.value)
     rounds = settings.max_research_rounds(depth.value)
     name = {ResearchDepth.shallow: "Shallow  (fastest",
             ResearchDepth.standard: "Standard (balanced",
@@ -41,7 +41,7 @@ _PROVIDERS = ["ollama", "anthropic", "openai"]
 def render_sidebar() -> dict:
     """Render the sidebar and return the current UI settings as a dict.
 
-    Keys: provider, model, depth, max_sources, hitl_enabled,
+    Keys: provider, model, depth, hitl_enabled,
           uploaded_pdfs, extra_urls
     """
     with st.sidebar:
@@ -125,10 +125,6 @@ def render_sidebar() -> dict:
         )
 
         with st.expander("Advanced", expanded=False):
-            max_sources = st.slider(
-                "Max sources", min_value=3, max_value=30, value=settings.max_sources, step=1,
-                key="ui_max_sources",
-            )
             hitl_enabled = st.toggle(
                 "Pause before writing (HITL)",
                 value=True,
@@ -177,7 +173,6 @@ def render_sidebar() -> dict:
         "provider":          provider,
         "model":             model,
         "depth":             depth_key,
-        "max_sources":       max_sources,
         "hitl_enabled":      hitl_enabled,
         "llm_judge":         llm_judge,
         "uploaded_pdfs":     uploaded_pdfs or [],

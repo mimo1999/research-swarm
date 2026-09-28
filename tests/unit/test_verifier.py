@@ -34,9 +34,14 @@ def _v(n, verdict="supported", conflicts=()):
     return vf.FactVerdict(fact=n, verdict=verdict, conflicts_with=list(conflicts))
 
 
+def _set_cap(monkeypatch, cap):
+    """The writer cap for these tests' shallow runs (a depth profile overrides the global)."""
+    monkeypatch.setattr(settings, "depth_profiles", {"shallow": {"max_facts_for_writer": cap}})
+
+
 @pytest.fixture(autouse=True)
 def _cap(monkeypatch):
-    monkeypatch.setattr(settings, "max_facts_for_writer", 30)
+    _set_cap(monkeypatch, 30)
 
 
 # --- policy table -------------------------------------------------------------
@@ -80,7 +85,7 @@ async def test_conflicts_are_deduplicated_unordered_pairs():
 
 
 async def test_cap_keeps_best_grounded_and_lowers_the_rest_below_writer_bar(monkeypatch):
-    monkeypatch.setattr(settings, "max_facts_for_writer", 2)
+    _set_cap(monkeypatch, 2)
     fs = [_finding(1, "passage", 0.5), _finding(2, "quote", 0.6), _finding(3, "quote", 0.9),
           _finding(4, "none", 0.9)]
     llm = _llm([vf.VerifyBatch(verdicts=[_v(1), _v(2)])])
