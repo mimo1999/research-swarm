@@ -56,3 +56,20 @@ class TestRecoverFromBadEscapes:
         assert result is not None
         assert result.confidence == 0.9
         assert r"\(W\in\mathbb{R}^{d\times k}\)" in result.claim
+
+
+def test_repair_json_brackets():
+    import json
+
+    from research_swarm.agents._utils import repair_json_brackets
+
+    # the live failure: a list closed by "}" before its "]" (sections never closed)
+    broken = '{"a": [{"b": [1]}, {"c": [2]}\n}'
+    assert json.loads(repair_json_brackets(broken)) == {"a": [{"b": [1]}, {"c": [2]}]}
+    # brackets and escaped quotes inside strings are untouched
+    tricky = '{"t": "x ] } [ \\" y", "l": [1, 2'
+    assert json.loads(repair_json_brackets(tricky)) == {"t": 'x ] } [ " y', "l": [1, 2]}
+    # a stray closer is dropped; valid JSON is unchanged
+    assert json.loads(repair_json_brackets('{"a": 1}]')) == {"a": 1}
+    valid = '{"a": [1, {"b": "c"}]}'
+    assert repair_json_brackets(valid) == valid

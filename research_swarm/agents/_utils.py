@@ -111,6 +111,43 @@ def _extract_json_object(text: str) -> str:
     return text[start : end + 1]
 
 
+def repair_json_brackets(text: str) -> str:
+    """Close brackets a JSON text left unbalanced: where a closer does not match the innermost
+    open bracket, the missing closers are inserted first; a closer with no opener is dropped; any
+    brackets still open at the end are closed. String contents (with escapes) are left alone.
+
+    For unconstrained replies (Ollama Cloud did not enforce the JSON schema for gemma4:31b-cloud)
+    that were otherwise complete: one reply closed a nested object but forgot the list around it.
+    """
+    closer_of = {"{": "}", "[": "]"}
+    out: list[str] = []
+    stack: list[str] = []
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in closer_of:
+            stack.append(closer_of[ch])
+        elif ch in "}]":
+            if ch not in stack:
+                continue
+            while stack[-1] != ch:
+                out.append(stack.pop())
+            stack.pop()
+        out.append(ch)
+    out.extend(reversed(stack))
+    return "".join(out)
+
+
 def _repair_json_backslashes(text: str) -> str:
     r"""Escape backslashes that aren't already a valid JSON escape sequence.
 
