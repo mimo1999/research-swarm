@@ -1,6 +1,6 @@
 # Research Swarm — Development Summary
 
-> **Historical document.** This log describes an earlier version of the system. That version used a LlamaIndex/ChromaDB retrieval stack, a reranker, and critic / fact-checker / ReAct-worker agents, all since removed. For the current architecture see [README.md](README.md), [TECHNICAL_HANDOFF.md](TECHNICAL_HANDOFF.md) and [CLAUDE.md](CLAUDE.md).
+> **Historical document.** This log describes an earlier version of the system. That version used a LlamaIndex/ChromaDB retrieval stack, a reranker, and critic / fact-checker / ReAct-worker agents, all since removed. For the current architecture see [README.md](README.md), and [TECHNICAL_HANDOFF.md](TECHNICAL_HANDOFF.md).
 
 ## Project Overview
 
@@ -274,4 +274,4 @@ poetry run pytest tests/unit/test_graph.py -v  # one file
 
 ---
 
-**For detailed architecture, see `CLAUDE.md` and `README.md` in the repo.**
+**For the current architecture, see `README.md` and `TECHNICAL_HANDOFF.md` in the repo.**

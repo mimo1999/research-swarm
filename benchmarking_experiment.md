@@ -1,6 +1,6 @@
 # Benchmarking Experiment — Session Log
 
-> **Historical document.** This log describes an earlier version of the system. That version used embedding retrieval, a reranker and a fact-checker, all since removed; its numbers are not comparable with current runs. For the current architecture see [README.md](README.md), [TECHNICAL_HANDOFF.md](TECHNICAL_HANDOFF.md) and [CLAUDE.md](CLAUDE.md).
+> **Historical document.** This log describes an earlier version of the system. That version used embedding retrieval, a reranker and a fact-checker, all since removed; its numbers are not comparable with current runs. For the current architecture see [README.md](README.md), and [TECHNICAL_HANDOFF.md](TECHNICAL_HANDOFF.md).
 
 **Date:** 2026-06-11 to 2026-06-14  
 **Repository:** `swarm_agent_project` (LangGraph multi-agent research swarm)  

@@ -77,7 +77,7 @@ Every report ends with a reference list generated in code, plus methodology and 
 
 The SQLite checkpoints are migrated forward on load (`runtime/migrations.py`).
 
-[CLAUDE.md](CLAUDE.md) holds the detailed design notes, and [TECHNICAL_HANDOFF.md](TECHNICAL_HANDOFF.md) is the engineer's reference.
+[TECHNICAL_HANDOFF.md](TECHNICAL_HANDOFF.md) is the engineer's reference: stages, state, configuration and known limitations.
 
 ---
 

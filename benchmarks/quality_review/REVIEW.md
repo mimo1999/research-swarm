@@ -1,6 +1,6 @@
 # Independent quality / latency review of the research swarm
 
-> **Historical document.** This log describes an earlier version of the system. It reviewed the pre-v2 pipeline (fetch-and-embed pass, ReAct workers, critic and fact-checker), which the findings here led to replacing. For the current architecture see [README.md](../../README.md), [TECHNICAL_HANDOFF.md](../../TECHNICAL_HANDOFF.md) and [CLAUDE.md](../../CLAUDE.md).
+> **Historical document.** This log describes an earlier version of the system. It reviewed the pre-v2 pipeline (fetch-and-embed pass, ReAct workers, critic and fact-checker), which the findings here led to replacing. For the current architecture see [README.md](../../README.md), and [TECHNICAL_HANDOFF.md](../../TECHNICAL_HANDOFF.md).
 
 Setup: local Ollama daemon proxying `nemotron-3-nano:30b-cloud` for all tiers (product defaults),
 `ollama_reasoning=True`, Windows CPU embeddings. Harness: `run_review.py`; traces in

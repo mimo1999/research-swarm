@@ -1,7 +1,6 @@
 # Research Swarm — Technical Handoff
 
 This is the reference for engineers picking up the codebase: what exists, where it lives, how it behaves and why. Related documents:
-- [CLAUDE.md](CLAUDE.md): the design notes, kept in step with the code.
 - [DEVELOPMENT_JOURNEY.md](DEVELOPMENT_JOURNEY.md): build chronology.
 - [benchmarks/README.md](benchmarks/README.md): benchmark methodology and numbers.
 
