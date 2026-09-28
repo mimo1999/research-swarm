@@ -18,32 +18,44 @@ and a human-in-the-loop checkpoint before the final write-up.
 
 ## Setup
 
-This Space runs on **Ollama Cloud, funded by the Space owner** — the only server-side secret it
-needs. Anthropic and OpenAI are deliberately *not* funded by this deployment: a visitor who wants
-either must type in their own key in the form's advanced options (sent per-request, bound to their
-session only, never written to `research_swarm.config.settings` — see `session_ctx.py`).
+**Models.** The research stages (paper scoring, fact extraction, gap fill, verification) run
+**Gemma 4 E2B (`google/gemma-4-E2B-it`) in this process on the Space's ZeroGPU**, through
+`transformers` (`research_swarm/agents/hf_local.py`, provider `huggingface`). The planner and
+the writer run `nemotron-3-nano:30b-cloud` on **Ollama Cloud**, called directly at
+`https://ollama.com`; no `ollama serve` runs in this container. That is the same split as a local
+run: a small model does the research, and a larger model plans and writes.
 
-Set as a **Space secret** (Settings → Variables and secrets — never commit a real key to the repo):
+**ZeroGPU quota.** GPU time is charged to the *visitor's* daily quota: 2 minutes anonymous,
+5 minutes for a signed-in free account, 40 minutes PRO. To keep a run inside that:
+- Concurrent calls from one run (one scoring or extraction call per sub-question, the verifier's
+  batches) are micro-batched into a single `generate()`, so they cost about as much as the longest
+  one.
+- Each reply is constrained to its stage's JSON schema (lm-format-enforcer), so no GPU time is
+  spent on replies that fail to parse.
+- The model is loaded to `cuda` at import time, as ZeroGPU requires, and the constraint tables
+  (about 5 s) are built at startup rather than inside a billed call.
 
-- `OLLAMA_API_KEY` — an Ollama Cloud API key (from your ollama.com account), used as a bearer
-  token against `https://ollama.com` directly. Confirmed live: `https://ollama.com` mirrors the
-  local daemon's API (`GET /api/tags` is public, `POST /api/chat` returns a clean
-  `401 {"error":"Unauthorized"}` without a valid token) — **no local `ollama serve` process runs
-  in this container**, unlike every other path in this codebase (Streamlit, the FastAPI backend),
-  which assume a local daemon proxying via `ollama login`. Verify this still holds against your
-  own real key before relying on it in production; if Ollama's cloud API surface changes, the
-  fallback path (running `ollama serve` inside the container via Docker SDK) is the one this repo
-  has actually proven elsewhere.
+If a visitor's quota runs out mid-run, the rest of that run's local calls fail fast and the page
+says the result is incomplete. Visitors can also pick the `ollama` provider (every research stage
+on Ollama Cloud, no GPU quota used) or bring their own Anthropic or OpenAI key.
 
-The form defaults to `ollama` / `cloud` deployment / `nemotron-3-nano:30b-cloud`, and reasoning
-mode is on by default (`ollama_reasoning` in `config.py`) — both validated this session to produce
-materially better structured-output reliability than the project's original default model.
+**Secrets** (Settings → Variables and secrets):
+- `OLLAMA_API_KEY`: the Ollama Cloud API key for the planner and writer, and for the `ollama`
+  provider option. Anthropic and OpenAI are not funded by this deployment. A visitor who wants
+  them enters their own key in Advanced options, bound to their session only (`session_ctx.py`).
 
-Recommended Space **variables**:
-- `DATA_DIR=/tmp/research_swarm_space` — the container's disk is ephemeral; keep checkpoints there.
-- `SPACE_MODE=true` — enables session pruning and a concurrency cap so one Space process handling
-  several simultaneous visitors doesn't run out of memory (each run holds its search results and
-  in-flight LLM calls). See `research_swarm/config.py`'s `space_*` settings.
+**Variables:**
+- `DATA_DIR=/tmp/research_swarm_space`: the container's disk is ephemeral.
+- `SPACE_MODE=true`: session pruning and a concurrent-run cap (`space_*` settings in
+  `research_swarm/config.py`).
+- `SPACE_LOCAL_MODEL`: the in-process model, default `google/gemma-4-E2B-it`. Set it empty to
+  run every stage on Ollama Cloud; the app then keeps only a placeholder `@spaces.GPU` function
+  for ZeroGPU's startup check.
+- Optional: `SUB_QUESTIONS_BY_DEPTH={"shallow":4,"standard":6,"deep":8}` to make runs cheaper,
+  and `HF_MAX_BATCH` / `HF_BATCH_WINDOW_S` for batching.
+
+**Deploy.** Copy `hf_space/app.py`, `hf_space/requirements.txt` and this `README.md` to the Space
+repo root, next to the `research_swarm/` package, then push.
 
 ## What's different from the chatbot template
 

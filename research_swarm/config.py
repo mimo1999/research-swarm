@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     # Ollama Cloud called directly (the writer's endpoint, below) -- its own pool, so the writer's
     # cloud calls don't queue behind the local daemon's.
     max_concurrent_llm_calls_ollama_cloud: int = 2
+    # In-process transformers (provider "huggingface"): requests must reach the micro-batcher
+    # together to be batched, so this matches hf_max_batch rather than capping at the GPU's 1.
+    max_concurrent_llm_calls_huggingface: int = 8
     data_dir: Path = Path("data")
 
     # ── Hosted-deployment mode (e.g. Hugging Face Spaces) ───────────────────
@@ -173,6 +176,17 @@ class Settings(BaseSettings):
     tier_standard_model_openai:    str = "gpt-5-nano"
     tier_thorough_provider: str = "ollama"
     tier_thorough_model:    str = "gemma4:e2b"
+
+    # ── In-process Hugging Face transformers (provider "huggingface", agents/hf_local.py) ────
+    # For hosts with a GPU but no Ollama daemon (a ZeroGPU Space). Any tier whose provider is
+    # "huggingface" runs this model in the app process. Concurrent calls within a session are
+    # micro-batched: collected for up to hf_batch_window_s, at most hf_max_batch per generate().
+    hf_model_id: str = "google/gemma-4-E2B-it"
+    hf_max_batch: int = 8   # >= the deepest profile's sub_questions: one batch per stage
+    hf_batch_window_s: float = 0.3
+    # Ceiling on one ZeroGPU call's requested duration (spaces.GPU(duration=...)); quota is
+    # charged on actual GPU time, but a shorter request gets better queue priority.
+    hf_gpu_duration_max_s: int = 120
 
     # ── Large model for the few stages that need it (its own endpoint) ────────
     # Every other stage uses the tiers above (local gemma4). The stages in large_model_stages use

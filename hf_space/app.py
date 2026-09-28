@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import uuid
 
@@ -37,27 +38,48 @@ from research_swarm.schemas import ResearchQuery
 
 try:
     import spaces
-except ImportError:  # not on ZeroGPU hardware -- see _zerogpu_placeholder below
+except ImportError:  # not on a Space: @spaces.GPU is a no-op
     class spaces:  # type: ignore[no-redef]
         @staticmethod
-        def GPU(fn):
-            return fn
-
-
-@spaces.GPU
-def _zerogpu_placeholder() -> bool:
-    """Satisfies ZeroGPU's startup check ("No @spaces.GPU function detected
-    during startup"). This app's LLM calls go to Ollama Cloud and its
-    embedding model is CPU-sized -- it never actually needs a GPU. ZeroGPU
-    is required only because it's (at time of writing) the only hardware
-    tier available on this Space's plan; if that changes, this function and
-    the `spaces` import above can be deleted along with switching the
-    Space's hardware to cpu-basic.
-    """
-    return True
+        def GPU(fn=None, **_kwargs):
+            return fn if fn is not None else (lambda f: f)
 
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Research model on this Space's ZeroGPU (in-process transformers)
+# ---------------------------------------------------------------------------
+# The research stages (paper scoring, extraction, gap fill, verification) run the small model
+# in this process on ZeroGPU; the planner and writer stay on the large model via Ollama Cloud
+# (settings.large_model_stages, OLLAMA_API_KEY). ZeroGPU requires the model to be put on
+# "cuda" at import time; a real GPU is attached only inside the @spaces.GPU function, whose
+# time is charged to the visiting user's daily quota (2 min anonymous, 5 min signed in).
+# Concurrent calls are micro-batched into one generate() (agents/hf_local.py) to keep a run
+# inside that quota. SPACE_LOCAL_MODEL="" turns this off (every stage on Ollama Cloud).
+_LOCAL_MODEL = os.getenv("SPACE_LOCAL_MODEL", settings.hf_model_id).strip()
+_ON_ZEROGPU = os.getenv("SPACES_ZERO_GPU", "").lower() in ("1", "true")
+_USE_LOCAL_MODEL = bool(_LOCAL_MODEL) and _ON_ZEROGPU
+
+if _USE_LOCAL_MODEL:
+    from research_swarm.agents import hf_local
+
+    settings.hf_model_id = _LOCAL_MODEL
+    for _tier in ("fast", "standard", "thorough"):
+        setattr(settings, f"tier_{_tier}_provider", "huggingface")
+    hf_local.load(_LOCAL_MODEL, device="cuda")
+
+    @spaces.GPU(duration=hf_local.estimate_gpu_seconds)
+    def _gpu_generate(requests: list[dict]) -> list[dict]:
+        return hf_local.generate_batch(requests)
+
+    hf_local.set_gpu_runner(_gpu_generate)
+else:
+    @spaces.GPU
+    def _zerogpu_placeholder() -> bool:
+        """Satisfies ZeroGPU's startup check ("No @spaces.GPU function detected during
+        startup") when the local model is off and every call goes to Ollama Cloud."""
+        return True
 
 # This deployment pays for Ollama Cloud (OLLAMA_API_KEY, a Space secret --
 # see settings.ollama_api_key) and reaches it *directly*, with no local
@@ -69,15 +91,18 @@ logger = logging.getLogger(__name__)
 # funded by this deployment -- there's no server key for them at all, so a
 # visitor who wants those must type in their own (see the password fields
 # below, threaded through session_ctx per-request, never settings).
-_SPACE_DEFAULT_PROVIDER = "ollama"
-_SPACE_DEFAULT_MODEL = "nemotron-3-nano:30b-cloud"
+_OLLAMA_CLOUD_MODEL = "nemotron-3-nano:30b-cloud"
+_SPACE_DEFAULT_PROVIDER = "huggingface" if _USE_LOCAL_MODEL else "ollama"
+_SPACE_DEFAULT_MODEL = _LOCAL_MODEL if _USE_LOCAL_MODEL else _OLLAMA_CLOUD_MODEL
 _OLLAMA_CLOUD_BASE_URL = "https://ollama.com"
 
 _PROVIDER_MODEL_DEFAULTS = {
     "anthropic": "claude-haiku-4-5-20251001",
     "openai": "gpt-5-nano",
-    "ollama": _SPACE_DEFAULT_MODEL,
+    "ollama": _OLLAMA_CLOUD_MODEL,
+    "huggingface": _LOCAL_MODEL,
 }
+_PROVIDERS = (["huggingface"] if _USE_LOCAL_MODEL else []) + ["ollama", "anthropic", "openai"]
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +551,12 @@ async def _drive(graph, input_state, config, trace, session_id):
 
                 snapshot = await graph.aget_state(config)
                 values = snapshot.values or {}
+                notice = gr.update(visible=False)
+                if _USE_LOCAL_MODEL and hf_local.pop_quota_error(session_id):
+                    notice = gr.update(visible=True, value=(
+                        "**Your daily ZeroGPU quota ran out during this run**, so later research "
+                        "steps were skipped and the result below is incomplete. Sign in to "
+                        "Hugging Face for a larger quota, or choose the ollama provider."))
                 if snapshot.next:
                     findings = values.get("findings", []) or []
                     critiques = values.get("critiques", []) or []
@@ -533,7 +564,7 @@ async def _drive(graph, input_state, config, trace, session_id):
                         gr.update(visible=False),
                         gr.update(value=render_trace_html(trace, live=False), visible=True),
                         gr.update(visible=True), gr.update(value=render_hitl_html(findings, critiques)),
-                        gr.update(visible=False), gr.update(visible=False), gr.update(visible=False),
+                        gr.update(visible=False), gr.update(visible=False), notice,
                         gr.update(), gr.update(), trace,
                     )
                 else:
@@ -543,7 +574,7 @@ async def _drive(graph, input_state, config, trace, session_id):
                         gr.update(value=render_trace_html(trace, live=False), visible=True),
                         gr.update(visible=False), gr.update(),
                         gr.update(value=render_report_html(report), visible=True),
-                        gr.update(visible=True), gr.update(visible=False),
+                        gr.update(visible=True), notice,
                         gr.update(), gr.update(), trace,
                     )
             finally:
@@ -754,8 +785,10 @@ with gr.Blocks(title="Research Swarm") as demo:
         )
         with gr.Accordion("Advanced options", open=False):
             provider = gr.Radio(
-                ["ollama", "anthropic", "openai"], value=_SPACE_DEFAULT_PROVIDER, label="Provider",
-                info="Ollama runs on this Space's own account. Anthropic/OpenAI need your own API key.",
+                _PROVIDERS, value=_SPACE_DEFAULT_PROVIDER, label="Provider",
+                info=("huggingface = Gemma on this Space's GPU (uses your daily ZeroGPU quota; "
+                      "sign in to Hugging Face for more). Ollama runs on this Space's own "
+                      "account. Anthropic/OpenAI need your own API key."),
             )
             model = gr.Textbox(value=_SPACE_DEFAULT_MODEL, label="Model")
             anthropic_key = gr.Textbox(

@@ -314,10 +314,15 @@ If rendering is empty or parsing fails, the free-form writer runs, grounded by `
 
 ## 6. LLM routing, concurrency and budgets
 
-- **Provider factory** (`agents/base.py::get_agent_llm`): `ChatAnthropic` / `ChatOpenAI` / `ChatOllama`, with an optional `base_url`. Keys come from `runtime/session_ctx.py::resolve_api_key`, which prefers the session's own key over the process one (the Space and API are multi-tenant).
+- **Provider factory** (`agents/base.py::get_agent_llm`): `ChatAnthropic` / `ChatOpenAI` / `ChatOllama` (with an optional `base_url`) / `ChatHFLocal` (provider `huggingface`: a `transformers` model in the app process, see below). Keys come from `runtime/session_ctx.py::resolve_api_key`, which prefers the session's own key over the process one (the Space and API are multi-tenant).
 - **Tiers** (`get_tiered_llm`): `fast` (scorer, verifier), `standard` (extraction, gap fill; follows the sidebar's provider), `thorough` (supervisor, writer).
 - **Large model** (`nodes._get_tiered_state_llm`): a stage whose agent label is in `large_model_stages` uses `large_model` on `large_model_ollama_base_url` (default Ollama Cloud directly, with `OLLAMA_API_KEY`). Moving a stage is a config change.
 - **Concurrency** (`runtime/limits.py::llm_slot`): a process-wide cap on in-flight requests per provider. The `ollama_cloud` pool is separate from the local daemon's, so writer calls don't queue behind local extraction. `ainvoke_with_retry` holds a slot only while a request is in flight and retries 429 / 5xx / timeouts with jittered backoff. `document_worker_concurrency` caps a run's document fan-out.
+- **In-process transformers** (`agents/hf_local.py`, used by the ZeroGPU Space):
+  - `load()` puts the model on the device once per process; on ZeroGPU this happens at import.
+  - `generate_batch()` runs one `generate()` over several prompts, each constrained to its JSON schema by lm-format-enforcer. The enforcer tables are built directly, because its transformers integration doesn't import on transformers 5. Arguments and results are plain dicts, because ZeroGPU pickles them.
+  - A per-session micro-batcher groups a run's concurrent calls: up to `hf_max_batch` (6) within `hf_batch_window_s` (0.3 s). ZeroGPU bills each visitor by GPU time, so a batch costs about as much as its longest row. Batchers are keyed by session and Gradio event, so a GPU call is charged to the visitor who made it.
+  - A quota error marks the session; its remaining local calls fail fast, and the Space tells the visitor the result is incomplete.
 - **Budgets** (`runtime/budget.py`):
   - A **research** pool (`max_llm_calls`, 40) and a **review** pool (`max_review_llm_calls`, 10) of call counts.
   - A session-wide token cap (`max_tokens_per_session`).

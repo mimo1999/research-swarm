@@ -3,15 +3,9 @@
 # streamlit / fastapi / uvicorn / sse-starlette / python-multipart are the
 # main project's OTHER two UIs and aren't needed here.
 #
-# gradio is capped at <=6.17.3 deliberately, not just <7.0.0: gradio 6.18.0
-# raised its huggingface-hub floor from >=0.33.5 to >=1.2.0 (and 6.20.0+ to
-# >=1.16.0), which is incompatible with every published transformers release
-# (transformers pins huggingface-hub<1.0, even as of 4.57.6) -- transformers
-# is pulled in transitively via sentence-transformers /
-# llama-index-embeddings-huggingface below. This produced a hard
-# ResolutionImpossible on the Space's build (confirmed against the actual
-# container logs), not just a local venv quirk. 6.17.3 is the newest gradio
-# release still on the huggingface-hub<2.0,>=0.33.5 floor.
+# gradio was capped at <=6.17.3 because transformers 4.x pinned huggingface-hub<1.0, which
+# newer gradio releases conflict with. transformers 5 (below) needs huggingface-hub>=1.5, which
+# 6.17.3 also accepts; the cap is kept only because newer gradio has not been tried on the Space.
 gradio>=6.0.0,<=6.17.3
 
 # LangGraph / LangChain
@@ -46,4 +40,12 @@ markdown>=3.7
 
 # Utilities
 tiktoken>=0.7.0
-sentence-transformers>=4.0.0,<5.0.0
+
+# In-process research model on ZeroGPU (research_swarm/agents/hf_local.py).
+# Gemma 4 needs transformers >= 5.5 (its config was saved with 5.5.0.dev0); ZeroGPU supports
+# torch 2.8 - 2.13. lm-format-enforcer constrains each reply to the stage's JSON schema.
+torch>=2.8.0,<2.14
+transformers>=5.5.0
+accelerate>=1.1.0
+lm-format-enforcer>=0.11
+spaces

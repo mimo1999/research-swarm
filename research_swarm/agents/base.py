@@ -75,6 +75,9 @@ def get_tiered_llm(
         elif provider == "openai":
             model = settings.tier_standard_model_openai
 
+    if provider == "huggingface":
+        model = settings.hf_model_id
+
     return get_agent_llm(provider=provider, model=model, temperature=temperature)
 
 
@@ -91,6 +94,8 @@ def get_agent_llm(
       - ``"openai"``     -- GPT via OpenAI API
       - ``"ollama"``     -- a local daemon, or Ollama Cloud directly when *base_url* is
                             ``https://ollama.com`` (authenticated with the Ollama API key)
+      - ``"huggingface"`` -- a transformers model run in this process (agents/hf_local.py),
+                            e.g. on a ZeroGPU Space
 
     Defaults to ``settings.default_model_provider`` and
     ``settings.default_model_name`` when not specified. *base_url* overrides the session's Ollama
@@ -132,7 +137,12 @@ def get_agent_llm(
             reasoning=settings.ollama_reasoning or None,
         )
 
+    if provider == "huggingface":
+        from research_swarm.agents.hf_local import ChatHFLocal  # lazy: needs torch
+        return ChatHFLocal(model=model, temperature=temperature,
+                           reasoning=settings.ollama_reasoning or None)
+
     raise ValueError(
         f"Unsupported provider {provider!r}. "
-        "Use 'anthropic', 'openai', or 'ollama'."
+        "Use 'anthropic', 'openai', 'ollama' or 'huggingface'."
     )

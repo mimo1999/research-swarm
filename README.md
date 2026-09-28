@@ -216,7 +216,7 @@ Benchmarks and ablations live in `benchmarks/` (see [benchmarks/README.md](bench
 ## Deployment
 
 - **Docker** (`Dockerfile`): Streamlit on port 8501, with `SPACE_MODE=true` and `DATA_DIR=/tmp/research_swarm_space`.
-- **Hugging Face Space** (`hf_space/`): a Gradio app that runs against Ollama Cloud directly. See [hf_space/README.md](hf_space/README.md).
+- **Hugging Face Space** (`hf_space/`): a Gradio app on ZeroGPU. The research stages run Gemma 4 E2B in-process with `transformers`; the planner and writer run on Ollama Cloud. See [hf_space/README.md](hf_space/README.md).
 - `SPACE_MODE=true` turns on startup session pruning (`SPACE_RETENTION_SECONDS`, `SPACE_MAX_SESSIONS`) and a cap on concurrent runs (`SPACE_MAX_CONCURRENT_RUNS`). Without it these are no-ops.
 - A container has no local Ollama daemon, so set every `TIER_*_PROVIDER` explicitly (anthropic / openai), or point `OLLAMA_BASE_URL` at `https://ollama.com` with `OLLAMA_API_KEY`.
 
@@ -229,5 +229,6 @@ Benchmarks and ablations live in `benchmarks/` (see [benchmarks/README.md](bench
 | `ollama` | Ollama running locally | Default. Research stages run on `gemma4:e2b`. Cloud models go through `ollama login` on the daemon, or directly to `https://ollama.com` with `OLLAMA_API_KEY` (the large-model path). |
 | `anthropic` | `ANTHROPIC_API_KEY` | Claude models on every tier. |
 | `openai` | `OPENAI_API_KEY` | GPT models on every tier. |
+| `huggingface` | a GPU, plus `torch`, `transformers>=5.5` and `lm-format-enforcer` | Runs `HF_MODEL_ID` (default `google/gemma-4-E2B-it`) inside the app process (`agents/hf_local.py`). Used on the ZeroGPU Space. Concurrent calls are micro-batched and each reply is constrained to its JSON schema. |
 
 General web search (Tavily) is optional. Without `TAVILY_API_KEY`, search uses arXiv, PubMed and Europe PMC, which need no key.
