@@ -68,8 +68,30 @@ async def make_async_checkpointer():
     return cp
 
 
-def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
+def _build_packet_graph(checkpointer, interrupt_before_writer: bool):
+    """The packet path (CONTEXT.md): plan -> evidence packet -> synthesis. The synthesis node
+    sits in the writer's slot, so the review pause (``interrupt_before=["writer"]``), resume and
+    the UI's diagram behave as in the fact chain."""
+    sg = StateGraph(AgentState)
+    sg.add_node("supervisor",  _nodes.packet_plan_node)
+    sg.add_node("packet_node", _nodes.packet_node)
+    sg.add_node("writer",      _nodes.synthesis_node)
+    sg.add_edge(START, "supervisor")
+    sg.add_edge("supervisor", "packet_node")
+    sg.add_edge("packet_node", "writer")
+    sg.add_edge("writer", END)
+    compile_kwargs: dict[str, Any] = {"checkpointer": checkpointer}
+    if interrupt_before_writer:
+        compile_kwargs["interrupt_before"] = ["writer"]
+    return sg.compile(**compile_kwargs)
+
+
+def build_graph(checkpointer=None, interrupt_before_writer: bool = True,
+                pipeline_mode: str | None = None):
     """Build and compile the StateGraph.
+
+    *pipeline_mode* ("facts" | "packet", default ``settings.pipeline_mode``) picks the evidence
+    path; each is its own graph (see ``_build_packet_graph``).
 
     All graph nodes are async, so the caller is responsible for supplying an
     async-compatible checkpointer (AsyncSqliteSaver in production, MemorySaver
@@ -88,6 +110,11 @@ def build_graph(checkpointer=None, interrupt_before_writer: bool = True):
     """
     if checkpointer is None:
         checkpointer = MemorySaver(serde=_serde)
+    mode = pipeline_mode or settings.pipeline_mode
+    if mode == "packet":
+        return _build_packet_graph(checkpointer, interrupt_before_writer)
+    if mode != "facts":
+        raise ValueError(f"Unknown pipeline_mode {mode!r}; use 'facts' or 'packet'.")
 
     sg = StateGraph(AgentState)
 

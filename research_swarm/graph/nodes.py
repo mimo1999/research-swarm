@@ -1000,3 +1000,93 @@ async def writer_node(state: AgentState) -> dict[str, Any]:
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# Packet path (settings.pipeline_mode == "packet"; CONTEXT.md):
+#   supervisor (packet_plan_node) -> packet_node -> writer (synthesis_node)
+# Milestone 1 covers supplied sources: no search, and no planning call when the sources are given.
+# ---------------------------------------------------------------------------
+
+@traced_node("supervisor")
+async def _supplied_sources_plan(state: AgentState) -> dict[str, Any]:
+    from research_swarm.schemas.plan import ResearchPlan
+    from research_swarm.schemas.worker import SubQuestionAssignment
+
+    question = research_topic(state.get("query")) or "the question"
+    plan = ResearchPlan(
+        sub_questions=[question],
+        strategy="Supplied sources: one evidence packet, one synthesis call.",
+        assignments=[SubQuestionAssignment(sub_question=question)],
+    )
+    trace_event(state.get("session_id", "default"), "supervisor.plan", "note",
+                source="supplied", text=plan.model_dump_json())
+    return {
+        "plan": plan,
+        "iteration_count": state.get("iteration_count", 0) + 1,
+        "messages": [AIMessage(content="[Supervisor] Sources supplied: no planning call.")],
+    }
+
+
+async def packet_plan_node(state: AgentState) -> dict[str, Any]:
+    """Planning for the packet path: only when there is something to search. With supplied
+    sources the whole question is the single sub-question and no LLM is called; otherwise the
+    usual planner runs (searching for the packet path is milestone 2)."""
+    if state.get("plan") is None and state.get("ingested_documents"):
+        return await _supplied_sources_plan(state)
+    return await supervisor_node(state)
+
+
+@traced_node("packet")
+async def packet_node(state: AgentState) -> dict[str, Any]:
+    """Build the evidence packet from the run's sources (agents/packet.py)."""
+    from research_swarm.agents.packet import build_packet, llm_screener
+
+    query = state.get("query")
+    plan = state.get("plan")
+    question = research_topic(query) or ""
+    frame = getattr(plan, "frame", None) if plan else None
+    sources = state.get("ingested_documents") or []
+    budget = settings.for_depth("packet_budget", getattr(query, "depth", None))
+    # The local small model screens passages only when the sources overflow the budget.
+    screener = llm_screener(_get_tiered_state_llm(state, "fast", agent="packet_screen"),
+                            state.get("session_id")) if sources else None
+    packet = await build_packet(
+        question, list(plan.sub_questions) if plan else [question], sources, budget,
+        screener=screener,
+        scope_phrases=frame.scope_phrases() if frame is not None and frame.has_constraint
+        else (),
+    )
+    trace_event(state.get("session_id", "default"), "packet.built", "note",
+                budget=budget, **packet.stats)
+    return {
+        "evidence_packet": packet.to_dict(),
+        "messages": [AIMessage(content=(
+            f"[Packet] {packet.stats['kept_sentences']} sentence(s) from "
+            f"{packet.stats['sources']} source(s), ~{packet.stats['kept_tokens']} tokens "
+            f"(budget {budget}, fit: {packet.stats['fit']})."))],
+    }
+
+
+@traced_node("writer")
+async def synthesis_node(state: AgentState) -> dict[str, Any]:
+    """One large-model call over the evidence packet, audited by the code render
+    (agents/synthesis.py). Takes the writer's place in the graph, so the review pause and the
+    UI's diagram treat it as the writer."""
+    from research_swarm.agents.synthesis import run_synthesis
+
+    llm = _get_tiered_state_llm(state, "thorough", pool="review", agent="synthesis")
+    report, cited = await run_synthesis(state, llm)
+    trace_event(
+        state.get("session_id", "default"), "writer.report", "note",
+        title=report.title, n_sections=len(report.sections or []),
+        n_references=len(report.references or []), n_cited_sentences=len(cited),
+        text=report.model_dump_json(exclude={"references"}),
+    )
+    return {
+        "final_report": report,
+        "draft_report": report,
+        "findings": cited,
+        "writer_instructions": None,
+        "messages": [AIMessage(content=f"[Synthesis] Report complete: {report.title}")],
+    }

@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     # suffix. Unlisted stages keep ollama_reasoning.
     no_thinking_stages: list[str] = [
         "supervisor", "expansion", "writer", "judge", "verifier", "gap_fill",
-        "paper_scout", "paper_worker", "document_worker",
+        "paper_scout", "paper_worker", "document_worker", "synthesis", "packet_screen",
     ]
     # Output cap for those stages, so a runaway generation can't hold the slot for minutes
     # (a writer once produced 131k tokens of empty output over ~7 minutes).
@@ -200,11 +200,15 @@ class Settings(BaseSettings):
     large_model_provider: str = "ollama"
     large_model: str = "gemma4:31b-cloud"
     large_model_ollama_base_url: str = "https://ollama.com"   # "" = the normal OLLAMA_BASE_URL
-    large_model_stages: list[str] = ["supervisor", "writer"]
+    large_model_stages: list[str] = ["supervisor", "writer", "synthesis"]
     # "sectioned": outline call -> one call per section (with that section's facts, evidence
     # and sources) -> a final review call that fixes or deletes unsupported sentences and writes
     # the answer and summary (agents/writer_sections.py). "single": one call for the whole draft.
     writer_mode: str = "sectioned"
+    # Evidence path (CONTEXT.md): "facts" = the fact chain (extract -> verify -> label -> write);
+    # "packet" = evidence packet + one synthesis call (agents/packet.py, agents/synthesis.py),
+    # milestone 1: supplied sources only. Chosen when the graph is built.
+    pipeline_mode: str = "facts"
 
     # ── Research depth profiles ──────────────────────────────────────────────
     # Everything that scales with the depth the user picks, in one place (not exposed in the
@@ -219,24 +223,26 @@ class Settings(BaseSettings):
     #   paper_max_per_sub_question -- papers kept per sub-question for extraction
     #   deep_read_papers          -- papers whose full text is read
     #   max_facts_for_writer      -- sub_questions x 6 facts, so no depth drops paid-for evidence
+    #   packet_budget             -- tokens of source sentences the synthesis call reads
     depth_profiles: dict[str, dict[str, int]] = {
         "shallow": {"sub_questions": 3, "gap_fill_workers": 2, "research_rounds": 1,
                     "paper_prefilter_pool": 32, "paper_max_candidates": 16,
                     "paper_max_per_sub_question": 4, "deep_read_papers": 1,
-                    "max_facts_for_writer": 18},
+                    "max_facts_for_writer": 18, "packet_budget": 2000},
         "standard": {"sub_questions": 5, "gap_fill_workers": 3, "research_rounds": 2,
                      "paper_prefilter_pool": 48, "paper_max_candidates": 24,
                      "paper_max_per_sub_question": 6, "deep_read_papers": 2,
-                     "max_facts_for_writer": 30},
+                     "max_facts_for_writer": 30, "packet_budget": 4000},
         "deep": {"sub_questions": 7, "gap_fill_workers": 5, "research_rounds": 3,
                  "paper_prefilter_pool": 64, "paper_max_candidates": 32,
                  "paper_max_per_sub_question": 8, "deep_read_papers": 3,
-                 "max_facts_for_writer": 42},
+                 "max_facts_for_writer": 42, "packet_budget": 8000},
     }
     # Fallbacks for the profile-only keys (a run with no depth).
     sub_questions: int = 5
     research_rounds: int = 2
     gap_fill_workers: int = 0   # 0 = one worker per under-covered sub-question
+    packet_budget: int = 4000   # tokens of source sentences an evidence packet may hold
 
     # ── Stop-signal thresholds ───────────────────────────────────────────────
     # Fraction of new findings considered novel (below = stop).

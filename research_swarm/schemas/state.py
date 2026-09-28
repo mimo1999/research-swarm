@@ -156,6 +156,10 @@ class AgentState(TypedDict):
     # weakly answered sub-questions; collect_node clears it after that round.
     rework_instructions: NotRequired[str | None]
 
+    # The evidence packet (agents/packet.py, EvidencePacket.to_dict()) in pipeline mode "packet":
+    # the numbered source sentences the synthesis call reads. Written once by packet_node.
+    evidence_packet: NotRequired[dict | None]
+
     # Finding-id pairs the verifier found in direct conflict; the writer presents both sides.
     # Overwritten (plain LastValue), written once by verifier_node.
     fact_conflicts: NotRequired[list[list[str]]]
