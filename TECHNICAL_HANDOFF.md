@@ -24,7 +24,7 @@ The LLM stages are fixed pipelines with bounded call counts, not agent loops:
 
 | Stage | Calls per run (shallow, 3 sub-questions) | Model (default) |
 |---|---|---|
-| Question frame (query expansion) | 1 | large (`nemotron-3-nano:30b-cloud`) |
+| Question frame (query expansion) | 1 | large (`gemma4:31b-cloud`) |
 | Plan | 1 | large |
 | Paper relevance scoring | 1 per sub-question | local fast tier (`gemma4:e2b`) |
 | Document extraction | 1 per ~12k-char batch of uploads | local standard tier |
@@ -368,7 +368,7 @@ Other knobs:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `large_model`, `large_model_stages` | nemotron-3-nano:30b-cloud, [supervisor, writer] | `""` = all stages local |
+| `large_model`, `large_model_stages` | gemma4:31b-cloud, [supervisor, writer] | `""` = all stages local |
 | `writer_mode` | sectioned | or `single` |
 | `query_expansion_enabled`, `probe_results` | true, 8 | Question frame on/off |
 | `fetch_pass_results_per_tool`, `paper_prefilter_pool`, `paper_max_candidates` | 12, 48, 24 | Wide search, narrowed in code before the scorer |

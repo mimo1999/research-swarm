@@ -16,7 +16,7 @@ Built with **LangGraph 1.2** and **Streamlit**. A FastAPI backend, a Next.js UI 
 
 **Design stance:**
 - **Evidence first.** An LLM call is spent only on judgments that need language understanding. Everything that can be checked in code is checked in code: quote location, citation numbering, scope, strict-claim wording and duplicates.
-- **Local first.** Research runs on a small local model (`gemma4:e2b` via Ollama). A larger model (`nemotron-3-nano:30b-cloud` on Ollama Cloud by default) guards only the planner and the writer. It can be removed with one setting on a bigger GPU.
+- **Local first.** Research runs on a small local model (`gemma4:e2b` via Ollama). A larger model (`gemma4:31b-cloud` on Ollama Cloud by default) guards only the planner and the writer. It can be removed with one setting on a bigger GPU.
 
 ---
 
@@ -151,7 +151,7 @@ DEFAULT_MODEL_NAME=gemma4:e2b
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_API_KEY=...                     # for the large model on Ollama Cloud
 
-LARGE_MODEL=nemotron-3-nano:30b-cloud  # "" = every stage uses the local tiers
+LARGE_MODEL=gemma4:31b-cloud           # "" = every stage uses the local tiers
 LARGE_MODEL_OLLAMA_BASE_URL=https://ollama.com
 LARGE_MODEL_STAGES=["supervisor","writer"]
 WRITER_MODE=sectioned                  # sectioned | single

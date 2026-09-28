@@ -21,7 +21,7 @@ and a human-in-the-loop checkpoint before the final write-up.
 **Models.** The research stages (paper scoring, fact extraction, gap fill, verification) run
 **Gemma 4 E2B (`google/gemma-4-E2B-it`) in this process on the Space's ZeroGPU**, through
 `transformers` (`research_swarm/agents/hf_local.py`, provider `huggingface`). The planner and
-the writer run `nemotron-3-nano:30b-cloud` on **Ollama Cloud**, called directly at
+the writer run `gemma4:31b-cloud` on **Ollama Cloud**, called directly at
 `https://ollama.com`; no `ollama serve` runs in this container. That is the same split as a local
 run: a small model does the research, and a larger model plans and writes.
 

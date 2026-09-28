@@ -91,7 +91,7 @@ else:
 # funded by this deployment -- there's no server key for them at all, so a
 # visitor who wants those must type in their own (see the password fields
 # below, threaded through session_ctx per-request, never settings).
-_OLLAMA_CLOUD_MODEL = "nemotron-3-nano:30b-cloud"
+_OLLAMA_CLOUD_MODEL = "gemma4:31b-cloud"
 _SPACE_DEFAULT_PROVIDER = "huggingface" if _USE_LOCAL_MODEL else "ollama"
 _SPACE_DEFAULT_MODEL = _LOCAL_MODEL if _USE_LOCAL_MODEL else _OLLAMA_CLOUD_MODEL
 _OLLAMA_CLOUD_BASE_URL = "https://ollama.com"

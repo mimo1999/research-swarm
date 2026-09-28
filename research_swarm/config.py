@@ -171,7 +171,7 @@ class Settings(BaseSettings):
     # worker tier's whole point is "smallest model that still works reliably".
     tier_standard_model:           str = "gemma4:e2b"
     tier_standard_model_local:     str = "gemma4:e2b"                    # ollama, local daemon
-    tier_standard_model_cloud:     str = "nemotron-3-nano:30b-cloud"    # ollama, cloud-hosted
+    tier_standard_model_cloud:     str = "gemma4:31b-cloud"             # ollama, cloud-hosted
     tier_standard_model_anthropic: str = "claude-haiku-4-5-20251001"
     tier_standard_model_openai:    str = "gpt-5-nano"
     tier_thorough_provider: str = "ollama"
@@ -198,7 +198,7 @@ class Settings(BaseSettings):
     #                 and every later stage inherits those queries.
     # large_model="" = every stage uses its tier.
     large_model_provider: str = "ollama"
-    large_model: str = "nemotron-3-nano:30b-cloud"
+    large_model: str = "gemma4:31b-cloud"
     large_model_ollama_base_url: str = "https://ollama.com"   # "" = the normal OLLAMA_BASE_URL
     large_model_stages: list[str] = ["supervisor", "writer"]
     # "sectioned": outline call -> one call per section (with that section's facts, evidence
