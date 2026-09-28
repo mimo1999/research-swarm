@@ -87,7 +87,7 @@ from research_swarm.ui.report_view import render_report
 from research_swarm.ui.sessions_view import render_sessions_tab
 from research_swarm.ui.sidebar import render_sidebar
 from research_swarm.ui.style import badge, inject_css
-from research_swarm.ui.trace import render_node_update, render_trace_header
+from research_swarm.ui.trace import render_node_update, render_packet, render_trace_header
 
 
 # ── Cached resources ──────────────────────────────────────────────────────────
@@ -114,14 +114,16 @@ def _agent_code_hash() -> str:
 
 
 @st.cache_resource(show_spinner="Loading graph…")
-def _get_graph(hitl: bool, _code_hash: str = ""):  # noqa: ARG001
-    """Build (and cache) the compiled LangGraph.  One instance per HITL setting.
+def _get_graph(hitl: bool, pipeline_mode: str = "facts", _code_hash: str = ""):  # noqa: ARG001
+    """Build (and cache) the compiled LangGraph: one instance per HITL setting and evidence path
+    (``pipeline_mode``: the fact chain or the evidence packet, each its own graph).
 
     _code_hash is derived from agent module mtimes — it busts the cache
     automatically whenever agent or tool code changes, so a server restart
     is no longer needed after edits.
     """
-    return build_graph(checkpointer=_get_checkpointer(), interrupt_before_writer=hitl)
+    return build_graph(checkpointer=_get_checkpointer(), interrupt_before_writer=hitl,
+                       pipeline_mode=pipeline_mode)
 
 
 @st.cache_resource(show_spinner=False)
@@ -449,7 +451,7 @@ def _render_hitl_panel(graph, config: dict) -> None:
     st.markdown("## Human Review Required")
     st.info(
         "The graph has paused before writing. "
-        "Review the findings below and choose how to proceed."
+        "Review the evidence below and choose how to proceed."
     )
 
     # Show current state (async checkpointer → must call aget_state)
@@ -470,7 +472,13 @@ def _render_hitl_panel(graph, config: dict) -> None:
         v_str   = verdict.value if hasattr(verdict, "value") else str(verdict)
         critique_by_fid[fid] = v_str
 
-    with st.expander(f"Findings ({len(findings)})", expanded=True):
+    packet = state_val.get("evidence_packet")
+    if packet is not None:
+        # Packet path: review exactly what the synthesis call will read.
+        st.markdown("#### Evidence packet")
+        render_packet(packet, expanded=True)
+    with st.expander(f"Findings ({len(findings)})", expanded=True) if packet is None \
+            else st.container():
         for f in findings:
             fid   = f.id    if hasattr(f, "id")    else f.get("id", "")
             claim = f.claim if hasattr(f, "claim") else f.get("claim", "")
@@ -497,7 +505,10 @@ def _render_hitl_panel(graph, config: dict) -> None:
     if col1.button("Approve & Write", type="primary", use_container_width=True):
         _resume_after_hitl(graph, config, feedback or "Approved.")
 
-    if col2.button("Edit & Re-research", use_container_width=True):
+    if col2.button("Edit & Re-research", use_container_width=True,
+                   disabled=packet is not None,
+                   help="Not available on the evidence-packet path yet: it has no search step "
+                        "to re-run until milestone 2." if packet is not None else None):
         # Empty feedback is fine: the weakly answered sub-questions are re-researched as
         # planned; text in the box also steers the new searches.
         _request_more_research(graph, config, feedback)
@@ -536,7 +547,7 @@ def _request_more_research(graph, config: dict, instructions: str) -> None:
 # ── Research tab ──────────────────────────────────────────────────────────────
 
 def render_research_tab(ui: dict) -> None:
-    graph  = _get_graph(ui["hitl_enabled"], _code_hash=_agent_code_hash())
+    graph  = _get_graph(ui["hitl_enabled"], ui["pipeline_mode"], _code_hash=_agent_code_hash())
     config = get_thread_config(st.session_state.session_id or "init")
 
     # ── Interrupted state: show HITL panel ──
@@ -646,6 +657,10 @@ def _render_query_form(ui: dict, graph) -> None:
     ingested_documents = _ingest_documents(ui["uploaded_pdfs"], ui["extra_urls"])
     if ingested_documents:
         st.toast(f"Loaded {len(ingested_documents)} document(s) for research.")
+    elif ui["pipeline_mode"] == "packet":
+        st.warning("The evidence-packet path needs sources for now: upload PDFs or add URLs in "
+                   "the sidebar, or switch the evidence path back to the fact chain.")
+        return
 
     initial_state = {
         "messages":            [],
@@ -716,7 +731,7 @@ def main() -> None:
             st.session_state.agent_trace = []
             st.session_state.final_report = None
             # Use the cached graph (with AsyncSqliteSaver) to load state
-            graph = _get_graph(ui["hitl_enabled"])
+            graph = _get_graph(ui["hitl_enabled"], ui["pipeline_mode"])
             config = get_thread_config(thread_id)
             snap = _run(graph.aget_state(config))
             if snap and snap.values:

@@ -41,7 +41,7 @@ _PROVIDERS = ["ollama", "anthropic", "openai"]
 def render_sidebar() -> dict:
     """Render the sidebar and return the current UI settings as a dict.
 
-    Keys: provider, model, depth, hitl_enabled,
+    Keys: provider, model, depth, hitl_enabled, pipeline_mode,
           uploaded_pdfs, extra_urls
     """
     with st.sidebar:
@@ -125,6 +125,23 @@ def render_sidebar() -> dict:
         )
 
         with st.expander("Advanced", expanded=False):
+            modes = ["facts", "packet"]
+            pipeline_mode = st.selectbox(
+                "Evidence path",
+                options=modes,
+                index=modes.index(settings.pipeline_mode)
+                if settings.pipeline_mode in modes else 0,
+                format_func=lambda m: {
+                    "facts": "Fact chain (extract, verify, write)",
+                    "packet": "Evidence packet (one synthesis call)",
+                }[m],
+                key="ui_pipeline_mode",
+                help=(
+                    "Evidence packet: sources become numbered sentences read by one large-model "
+                    "call that cites sentence IDs (see CONTEXT.md). It currently needs uploaded "
+                    "documents or URLs; searching for sources comes later."
+                ),
+            )
             hitl_enabled = st.toggle(
                 "Pause before writing (HITL)",
                 value=True,
@@ -174,6 +191,7 @@ def render_sidebar() -> dict:
         "model":             model,
         "depth":             depth_key,
         "hitl_enabled":      hitl_enabled,
+        "pipeline_mode":     pipeline_mode,
         "llm_judge":         llm_judge,
         "uploaded_pdfs":     uploaded_pdfs or [],
         "extra_urls":        extra_urls,

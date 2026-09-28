@@ -7,6 +7,10 @@ no parsing of the diagram itself. The two conditional edges that fan out via ``S
 ``document_pass_node`` and ``dispatch_node``) carry an explicit ``path_map`` in
 ``graph/builder.py`` purely so this diagram can draw them; LangGraph can't infer a
 Send-returning routing function's targets on its own, and silently drops the edge without it.
+
+The evidence-packet path (``pipeline_mode="packet"``) is its own graph -- ``supervisor`` ->
+``packet_node`` -> ``writer`` -- and renders the same way; the app caches one graph per
+pipeline mode, so the diagram always shows the path the run is actually taking.
 """
 from __future__ import annotations
 
@@ -44,8 +48,16 @@ def render_graph_diagram(
     <div class="mermaid">{mermaid}</div>
     <script type="module">
       import mermaid from '{_MERMAID_CDN}';
-      mermaid.initialize({{ startOnLoad: true, theme: 'dark', securityLevel: 'loose' }});
-      mermaid.run();
+      // Lay out only once the frame has a width: inside a collapsed expander (the finished run's
+      // "View agent trace") the iframe starts at zero width, and a diagram rendered then
+      // collapsed to a 16px icon.
+      mermaid.initialize({{ startOnLoad: false, theme: 'neutral', securityLevel: 'loose' }});
+      const timer = setInterval(() => {{
+        if (document.body.clientWidth > 0) {{
+          clearInterval(timer);
+          mermaid.run();
+        }}
+      }}, 150);
     </script>
     <style>
       body {{ margin: 0; background: transparent; }}

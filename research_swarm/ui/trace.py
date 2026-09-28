@@ -14,6 +14,7 @@ _NODE_META: dict[str, dict] = {
     "paper_scout_node":     {"label": "Paper scout",      "colour": "#00897b"},
     "paper_worker_node":    {"label": "Paper reader",     "colour": "#26a69a"},
     "worker_node":          {"label": "Gap fill",         "colour": "#26a69a"},
+    "packet_node":          {"label": "Evidence packet",  "colour": "#00897b"},
     "verifier":             {"label": "Verifier",         "colour": "#ef6c00"},
     "writer":               {"label": "Writer",           "colour": "#8e24aa"},
 }
@@ -45,6 +46,8 @@ def _render_update_body(node_name: str, update: dict[str, Any]) -> None:
         _render_supervisor(update)
     elif node_name in _FINDING_NODES:
         _render_findings(update)
+    elif node_name == "packet_node":
+        render_packet(update.get("evidence_packet") or {})
     elif node_name == "verifier":
         _render_verifier(update)
     elif node_name == "writer":
@@ -54,9 +57,9 @@ def _render_update_body(node_name: str, update: dict[str, Any]) -> None:
 
 
 def _render_supervisor(u: dict) -> None:
-    next_a = u.get("next_agent", "—")
-    iter_n = u.get("iteration_count", "—")
-    st.markdown(f"Routing to **{next_a}** &nbsp;·&nbsp; iteration {iter_n}")
+    if next_a := u.get("next_agent"):
+        st.markdown(f"Routing to **{next_a}** &nbsp;·&nbsp; iteration "
+                    f"{u.get('iteration_count', '—')}")
     if plan := u.get("plan"):
         frame = getattr(plan, "frame", None)
         if frame is not None and (frame.interpretation or frame.key_constraint):
@@ -124,6 +127,56 @@ def _render_writer(u: dict) -> None:
         st.success(f"Report complete: **{title}**")
     else:
         st.info("Writing report…")
+    # Packet path: the synthesis returns the packet sentences it cited as the run's findings.
+    cited = u.get("findings") or []
+    if cited:
+        st.caption(f"Rests on {len(cited)} cited source sentence(s), each verified by ID.")
+        with st.expander("View cited sentences", expanded=False):
+            for f in cited:
+                quote = f.quote if hasattr(f, "quote") else f.get("quote", "")
+                ev = (f.evidence if hasattr(f, "evidence") else f.get("evidence", [])) or []
+                first = ev[0] if ev else None
+                title = (first.title if hasattr(first, "title")
+                         else first.get("title", "")) if first is not None else ""
+                st.markdown(f"> {quote}")
+                if title:
+                    st.caption(title)
+
+
+def packet_summary(packet: dict) -> str:
+    """One line describing an evidence packet (``EvidencePacket.to_dict()``)."""
+    stats = packet.get("stats") or {}
+    sentences = packet.get("sentences") or []
+    fit = {"whole": "sources fit whole", "scored": "trimmed by code scoring",
+           "screened": "trimmed by local screening"}.get(stats.get("fit", ""), "")
+    line = (f"**{len(sentences)}** sentence(s) from **{stats.get('sources', 0)}** source(s), "
+            f"~{stats.get('kept_tokens', 0)} of {packet.get('budget_tokens', 0)} budget tokens")
+    if fit:
+        line += f" · {fit}"
+    if stats.get("screened_passages"):
+        line += (f" ({stats['rejected_passages']} of {stats['screened_passages']} passages "
+                 "rejected)")
+    if stats.get("duplicates"):
+        line += f" · {stats['duplicates']} duplicate(s) dropped"
+    return line
+
+
+def render_packet(packet: dict, expanded: bool = False) -> None:
+    """The evidence packet: what the synthesis call reads, grouped by source, with sentence IDs.
+    Shared by the trace card and the review pause."""
+    if not packet.get("sentences"):
+        st.info("The packet is empty: no source text was supplied.")
+        return
+    st.markdown(packet_summary(packet))
+    sources = {s["number"]: s for s in packet.get("sources") or []}
+    by_source: dict[int, list[dict]] = {}
+    for s in packet["sentences"]:
+        by_source.setdefault(s["source"], []).append(s)
+    with st.expander(f"View packet ({len(packet['sentences'])} sentences)", expanded=expanded):
+        for number, sents in by_source.items():
+            src = sources.get(number, {})
+            st.markdown(f"**[S{number}] {src.get('title') or src.get('url', '')}**")
+            st.markdown("\n".join(f"- `{s['id']}` {s['text']}" for s in sents))
 
 
 def _render_raw(u: Any) -> None:

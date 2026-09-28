@@ -123,3 +123,25 @@ def test_mermaid_source_marks_done_nodes_excluding_the_active_one():
 def test_mermaid_source_with_nothing_visited_yet_has_no_class_lines():
     src = _mermaid_source(_FakeGraph(), None, set())
     assert "class " not in src.replace("classDef", "")
+
+
+def test_packet_graph_diagram_highlights_its_own_nodes():
+    from research_swarm.graph.builder import build_graph
+
+    graph = build_graph(interrupt_before_writer=False, pipeline_mode="packet")
+    src = _mermaid_source(graph, "packet_node", {"supervisor", "packet_node"})
+    assert "packet_node" in src and "writer" in src
+    assert "paper_scout_node" not in src and "verifier" not in src     # the fact chain's nodes
+    assert "class supervisor done;" in src and "class packet_node active;" in src
+
+
+def test_packet_summary_line():
+    from research_swarm.ui.trace import packet_summary
+
+    packet = {"budget_tokens": 2000, "sentences": [{"id": "S1.1"}, {"id": "S1.2"}],
+              "stats": {"sources": 1, "kept_tokens": 150, "fit": "screened",
+                        "screened_passages": 5, "rejected_passages": 3, "duplicates": 1}}
+    line = packet_summary(packet)
+    assert "**2** sentence(s) from **1** source(s)" in line
+    assert "~150 of 2000 budget tokens" in line and "trimmed by local screening" in line
+    assert "3 of 5 passages rejected" in line and "1 duplicate(s) dropped" in line
