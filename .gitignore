@@ -38,6 +38,10 @@ data/
 # Claude Code
 .claude/
 CLAUDE.md
+SUMMARY.md
+TECHNICAL_HANDOFF.md
+DEVELOPMENT_JOURNEY.md
+CONTEXT.md
 
 # Cursor
 .cursor/
