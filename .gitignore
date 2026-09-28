@@ -93,6 +93,12 @@ $RECYCLE.BIN/
 .vscode/
 *.code-workspace
 
+# ── Benchmark folder cleanup ───────────────────────────────────────────────────
+# Legacy benchmark scripts/results/results-narrative from pipeline versions before the
+# current one (fact-chain/packet evidence paths) -- kept locally, not tracked. See
+# benchmarks/README.md.
+benchmarks/legacy/
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.log
 *.tmp
