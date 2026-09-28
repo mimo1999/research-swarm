@@ -28,6 +28,14 @@ class Finding(BaseModel):
             "unknown (a path that does not ground). Treat unknown like passage."
         ),
     )
+    quote: str = Field(
+        default="",
+        description=(
+            "The exact source text the fact rests on, as located in the source: the model's "
+            "quote (grounding=quote) or the matched passage (grounding=passage); empty otherwise. "
+            "Kept for evaluation against gold evidence (benchmarks/score_rationales.py)."
+        ),
+    )
     relevance: str = Field(
         default="unknown",
         description=(

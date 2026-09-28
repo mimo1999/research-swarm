@@ -18,7 +18,7 @@ from typing import Any, Literal
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from research_swarm.agents._utils import (
     ainvoke_with_retry,
@@ -26,7 +26,7 @@ from research_swarm.agents._utils import (
     recover_from_parse_failure,
     schema_output_instruction,
 )
-from research_swarm.agents.grounding import ground
+from research_swarm.agents.grounding import ground_span
 from research_swarm.agents.text import split_into_parts
 from research_swarm.config import settings
 from research_swarm.runtime.trace import trace_event
@@ -39,7 +39,22 @@ logger = logging.getLogger(__name__)
 _GROUNDING_CONFIDENCE = {"quote": 0.6, "passage": 0.5, "none": 0.3}
 
 
+def _schema_requires_quote(schema: dict) -> None:
+    """List ``quote`` as required in the JSON schema the model is constrained by and shown.
+
+    With ``quote`` merely optional, schema-constrained decoding let gemma4:e2b omit it on every
+    fact (a SciFact run located 0 of 25 quotes), so every fact fell back to passage grounding and
+    the quote path never ran. Validation still tolerates a missing quote (default ""), so one
+    model that skips it degrades that fact to passage grounding instead of failing the batch.
+    """
+    required = schema.setdefault("required", [])
+    if "quote" not in required:
+        required.append("quote")
+
+
 class ExtractedFact(BaseModel):
+    model_config = ConfigDict(json_schema_extra=_schema_requires_quote)
+
     source: int = Field(..., description="Number of the source [S#] this fact comes from")
     sub_question: int = Field(..., description="Number of the sub-question [Q#] it answers")
     claim: str = Field(
@@ -201,7 +216,7 @@ async def extract_facts(
 
         src = sources[fact.source - 1]
         sq = sub_questions[fact.sub_question - 1]
-        snippet, how = ground(claim, fact.quote, src.get("text", ""))
+        snippet, how, span = ground_span(claim, fact.quote, src.get("text", ""))
         counts[how] = counts.get(how, 0) + 1
         url = src.get("url", "")
         fid = (
@@ -209,7 +224,7 @@ async def extract_facts(
             if url else str(uuid.uuid4())
         )
         findings.append(Finding(
-            id=fid, claim=claim, sub_question=sq, grounding=how,
+            id=fid, claim=claim, sub_question=sq, grounding=how, quote=span,
             relevance=fact.relevance if scope else "unknown",
             confidence=_GROUNDING_CONFIDENCE.get(how, 0.5),
             evidence=[Source(

@@ -63,6 +63,17 @@ def test_ground_quote_passage_none_branches():
     assert how == "none" and snip == TEXT[:400]
 
 
+def test_ground_span_returns_the_located_source_text():
+    # the model's quote differs in case and spacing; the span is the text as it is in the source
+    _snip, how, span = g.ground_span("adults enrolled",
+                                     "the trial  enrolled 1,200 ADULTS", TEXT)
+    assert how == "quote" and span == "The trial enrolled 1,200 adults"
+    _snip, how, span = g.ground_span("HbA1c fell 1.2% in the treatment arm",
+                                     "totally invented words here now", TEXT)
+    assert how == "passage" and span in TEXT and "HbA1c" in span
+    assert g.ground_span("volcanic basalt lava", "", TEXT)[1:] == ("none", "")
+
+
 # --- numbers ----------------------------------------------------------------
 
 def test_ungrounded_numbers():

@@ -147,10 +147,19 @@ def ground(claim: str, quote: str, text: str, radius: int = 400) -> tuple[str, s
     ``passage``: it was not, but a passage shares most of the claim's terms.
     ``none``: no supporting passage; the snippet is just the head of the text.
     """
+    snippet, how, _span = ground_span(claim, quote, text, radius)
+    return snippet, how
+
+
+def ground_span(claim: str, quote: str, text: str,
+                radius: int = 400) -> tuple[str, str, str]:
+    """``ground`` plus the exact source text the fact rests on: the located quote as it appears
+    in *text* (``quote``), the matched passage (``passage``), or "" (``none``)."""
     match = locate_quote(quote, text) if quote and quote.strip() else None
     if match is not None:
-        return evidence_window(text, match.start, match.end, radius), "quote"
+        return (evidence_window(text, match.start, match.end, radius), "quote",
+                text[match.start:match.end])
     span = best_passage(claim, text)
     if span is not None:
-        return evidence_window(text, span[0], span[1], radius=0), "passage"
-    return text[:400], "none"
+        return evidence_window(text, span[0], span[1], radius=0), "passage", text[span[0]:span[1]]
+    return text[:400], "none", ""

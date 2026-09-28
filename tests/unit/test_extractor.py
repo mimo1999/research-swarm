@@ -91,3 +91,14 @@ async def test_transient_failure_returns_empty(monkeypatch):
     llm.with_structured_output.return_value.ainvoke = AsyncMock(side_effect=TimeoutError("boom"))
     monkeypatch.setattr(ex, "ainvoke_with_retry", AsyncMock(side_effect=TimeoutError("boom")))
     assert await ex.extract_facts("Q?", ["sq"], [_src(1, TEXT_A)], llm) == []
+
+
+def test_quote_is_required_in_the_schema_but_tolerated_when_missing():
+    """Constrained decoding must be made to emit a quote (gemma4:e2b skipped the optional field
+    on every fact), but a reply without one still parses and falls back to passage grounding."""
+    from research_swarm.agents.extractor import ExtractedFact, Extraction
+
+    fact_schema = Extraction.model_json_schema()["$defs"]["ExtractedFact"]
+    assert "quote" in fact_schema["required"]
+    fact = ExtractedFact.model_validate({"source": 1, "sub_question": 1, "claim": "c"})
+    assert fact.quote == ""
