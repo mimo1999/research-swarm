@@ -15,6 +15,7 @@ and from the real data/ directory.
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -32,10 +33,18 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     type                TEXT,
     checkpoint          BLOB,
     metadata            BLOB,
-    created_at          TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
 )
 """
+
+
+def _uuid6(when: str) -> str:
+    """A UUIDv6 checkpoint id for an ISO timestamp, like LangGraph's."""
+    from datetime import datetime
+    dt = datetime.fromisoformat(when).replace(tzinfo=UTC)
+    ticks = int((dt - datetime(1582, 10, 15, tzinfo=UTC)).total_seconds() * 10_000_000)
+    h = f"{ticks:015x}"
+    return f"{h[:8]}-{h[8:12]}-6{h[12:]}-8000-000000000000"
 
 
 def _seed_checkpoints(db_path: Path, rows: list[dict]) -> None:
@@ -46,10 +55,10 @@ def _seed_checkpoints(db_path: Path, rows: list[dict]) -> None:
         conn.execute(
             """
             INSERT INTO checkpoints
-                (thread_id, checkpoint_ns, checkpoint_id, created_at)
-            VALUES (?, '', ?, ?)
+                (thread_id, checkpoint_ns, checkpoint_id)
+            VALUES (?, '', ?)
             """,
-            (r["thread_id"], r["checkpoint_id"], r.get("created_at", "2024-01-01T00:00:00")),
+            (r["thread_id"], _uuid6(r["created_at"]) if "created_at" in r else r["checkpoint_id"]),
         )
     conn.commit()
     conn.close()

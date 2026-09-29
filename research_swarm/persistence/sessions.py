@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,18 @@ def _db_path() -> Path:
     p = settings.data_dir / "checkpoints" / "sessions.db"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _checkpoint_time(checkpoint_id: str | None) -> datetime | None:
+    """UTC time embedded in a LangGraph checkpoint id (UUIDv6); None if it isn't one."""
+    try:
+        h = uuid.UUID(checkpoint_id).hex
+        if h[12] != "6":
+            return None
+        ticks = int(h[:8] + h[8:12] + h[13:16], 16)  # 100 ns since 1582-10-15
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return datetime(1582, 10, 15, tzinfo=timezone.utc) + timedelta(microseconds=ticks // 10)
 
 
 @dataclass
@@ -31,7 +44,7 @@ def list_sessions() -> list[SessionSummary]:
 
     Reads directly from the LangGraph SqliteSaver schema
     (table: checkpoints, columns: thread_id, checkpoint_ns, checkpoint_id,
-     parent_checkpoint_id, type, checkpoint, metadata, created_at).
+     parent_checkpoint_id, type, checkpoint, metadata).
     """
     db = _db_path()
     if not db.exists():
@@ -40,14 +53,14 @@ def list_sessions() -> list[SessionSummary]:
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
     try:
-        # The LangGraph SqliteSaver table is named 'checkpoints'
+        # The saver's table has no timestamp column; checkpoint ids are time-ordered UUIDv6.
         cur = conn.execute(
             """
             SELECT
                 thread_id,
-                MIN(created_at) AS first_seen,
-                MAX(created_at) AS last_seen,
-                COUNT(*)        AS steps
+                MIN(checkpoint_id) AS first_seen,
+                MAX(checkpoint_id) AS last_seen,
+                COUNT(*)           AS steps
             FROM checkpoints
             GROUP BY thread_id
             ORDER BY last_seen DESC
@@ -60,23 +73,13 @@ def list_sessions() -> list[SessionSummary]:
     finally:
         conn.close()
 
-    def _parse_ts(raw: str | None) -> datetime | None:
-        if not raw:
-            return None
-        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f"):
-            try:
-                return datetime.strptime(raw, fmt).replace(tzinfo=timezone.utc)
-            except ValueError:
-                continue
-        return None
-
     summaries: list[SessionSummary] = []
     for row in rows:
         summaries.append(
             SessionSummary(
                 thread_id=row["thread_id"],
-                created_at=_parse_ts(row["first_seen"]),
-                updated_at=_parse_ts(row["last_seen"]),
+                created_at=_checkpoint_time(row["first_seen"]),
+                updated_at=_checkpoint_time(row["last_seen"]),
                 step_count=row["steps"],
                 has_report=False,
             )
