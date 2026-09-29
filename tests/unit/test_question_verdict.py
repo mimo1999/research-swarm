@@ -24,7 +24,7 @@ from research_swarm.schemas import (
     ResearchQuery,
     Source,
 )
-from research_swarm.schemas.worker import SubQuestionAssignment, WorkerRole
+from research_swarm.schemas.worker import SubQuestionAssignment
 from tests.unit.test_graph import _make_plan, _make_state
 
 SCIFACT = ("Using only the supplied scientific abstracts, classify the claim as exactly SUPPORT, "
@@ -137,7 +137,7 @@ async def test_supervisor_plans_the_content_and_drops_meta_sub_questions():
            "Does cold exposure change BAT recruitment in mammals?"]
     plan = ResearchPlan(
         sub_questions=sqs, strategy="s", required_tools=[],
-        assignments=[SubQuestionAssignment(sub_question=q, worker_role=WorkerRole.general)
+        assignments=[SubQuestionAssignment(sub_question=q)
                      for q in sqs])
     llm = MagicMock()
     llm.with_structured_output.return_value.ainvoke = AsyncMock(
@@ -201,7 +201,7 @@ async def test_supervisor_keeps_subject_sub_questions_of_an_ordinary_topic():
     sqs = ["How much does GPU inference cost per token?", "How does CPU inference scale?"]
     plan = ResearchPlan(
         sub_questions=sqs, strategy="s", required_tools=[],
-        assignments=[SubQuestionAssignment(sub_question=q, worker_role=WorkerRole.general)
+        assignments=[SubQuestionAssignment(sub_question=q)
                      for q in sqs])
     llm = MagicMock()
     llm.with_structured_output.return_value.ainvoke = AsyncMock(

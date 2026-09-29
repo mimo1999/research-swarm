@@ -98,6 +98,8 @@ $RECYCLE.BIN/
 # current one (fact-chain/packet evidence paths) -- kept locally, not tracked. See
 # benchmarks/README.md.
 benchmarks/legacy/
+reports/
+benchmarking_experiment.md
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.log

@@ -6,7 +6,7 @@ from .query import ResearchDepth, ResearchQuery
 from .report import FinalReport, ReportQualityScore, ReportSection
 from .source import Source, SourceType
 from .state import AgentName, AgentState
-from .worker import SubQuestionAssignment, WorkerRole
+from .worker import SubQuestionAssignment
 
 __all__ = [
     "ResearchQuery",
@@ -24,6 +24,5 @@ __all__ = [
     "LLMJudgeResult",
     "AgentState",
     "AgentName",
-    "WorkerRole",
     "SubQuestionAssignment",
 ]

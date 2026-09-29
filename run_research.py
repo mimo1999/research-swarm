@@ -170,13 +170,6 @@ async def run(topic: str, depth: str = "shallow", model_name: str | None = None)
     if plan:
         sq = plan.sub_questions if hasattr(plan, "sub_questions") else plan.get("sub_questions", [])
         print(f"  Sub-questions  {len(sq)}")
-        workers = plan.assignments if hasattr(plan, "assignments") else plan.get("assignments", [])
-        if workers:
-            roles = [
-                (a.worker_role if hasattr(a, "worker_role") else a.get("worker_role", "general"))
-                for a in workers
-            ]
-            print(f"  Worker roles   {', '.join(str(r) for r in roles)}")
 
     # ── Full Report ────────────────────────────────────────────────────────────
     print(f"\n{_BOLD}{SEP2}{_RESET}")

@@ -29,7 +29,7 @@ from research_swarm.schemas import (
     ResearchQuery,
 )
 from research_swarm.schemas.state import AgentState
-from research_swarm.schemas.worker import SubQuestionAssignment, WorkerRole
+from research_swarm.schemas.worker import SubQuestionAssignment
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -69,7 +69,7 @@ def _make_plan(n_questions: int = 2) -> ResearchPlan:
         required_tools=["web_search"],
         complexity_score=0.5,
         assignments=[
-            SubQuestionAssignment(sub_question=sq, worker_role=WorkerRole.general)
+            SubQuestionAssignment(sub_question=sq)
             for sq in sqs
         ],
     )

@@ -23,7 +23,6 @@ from research_swarm.schemas.state import AgentState
 _SCHEMA_MODULES: list[tuple[str, str]] = [
     ("research_swarm.schemas.query",    "ResearchDepth"),
     ("research_swarm.schemas.query",    "ResearchQuery"),
-    ("research_swarm.schemas.worker",   "WorkerRole"),
     ("research_swarm.schemas.worker",   "SubQuestionAssignment"),
     ("research_swarm.schemas.plan",     "ResearchPlan"),
     ("research_swarm.schemas.frame",    "QuestionFrame"),

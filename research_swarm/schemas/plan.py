@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 from pydantic.json_schema import SkipJsonSchema
 
 from .frame import QuestionFrame
-from .worker import SubQuestionAssignment, WorkerRole
+from .worker import SubQuestionAssignment
 
 
 class ResearchPlan(BaseModel):
@@ -29,8 +29,7 @@ class ResearchPlan(BaseModel):
     assignments: list[SubQuestionAssignment] = Field(
         default_factory=list,
         description=(
-            "Per-sub-question worker-role assignments. "
-            "When empty the dispatch node falls back to WorkerRole.general for all questions."
+            "Per-sub-question search query and domain. Empty: derived from the sub-question."
         ),
     )
 
@@ -38,13 +37,6 @@ class ResearchPlan(BaseModel):
     # question's distinguishing constraint, enforced by every later stage. Defaulted, so older
     # checkpoints still load. SkipJsonSchema keeps it out of the schema the planner is shown.
     frame: SkipJsonSchema[QuestionFrame | None] = None
-
-    def role_for(self, sub_question: str) -> WorkerRole:
-        """Return the assigned WorkerRole for *sub_question*, defaulting to general."""
-        for a in self.assignments:
-            if a.sub_question.strip().lower() == sub_question.strip().lower():
-                return a.worker_role
-        return WorkerRole.general
 
     def assignment_for(self, sub_question: str) -> SubQuestionAssignment | None:
         """Return the assignment for *sub_question* (case/whitespace-insensitive), if any."""

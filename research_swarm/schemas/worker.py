@@ -1,29 +1,14 @@
-"""Worker role definitions for heterogeneous parallel research dispatch."""
+"""Per-sub-question search assignment produced by the planner."""
 from __future__ import annotations
 
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from research_swarm.utils.compat import StrEnum
-
-
-class WorkerRole(StrEnum):
-    """Research perspective assigned to each parallel worker."""
-    general    = "general"    # balanced web + arxiv + pubmed
-    academic   = "academic"   # prioritises arXiv, DOI sources, peer-reviewed papers
-    industry   = "industry"   # prioritises web search, company blogs, case studies
-    skeptic    = "skeptic"    # actively seeks counter-evidence and limitations
-    benchmark  = "benchmark"  # seeks quantitative comparisons, metrics, evaluations
-
 
 class SubQuestionAssignment(BaseModel):
-    """Maps a single sub-question to the worker role best suited to answer it."""
+    """Search query and literature domain for one sub-question."""
     sub_question: str  = Field(..., description="The research sub-question")
-    worker_role:  WorkerRole = Field(
-        default=WorkerRole.general,
-        description="Which worker perspective should answer this sub-question",
-    )
     search_query: str = Field(
         default="",
         description=(

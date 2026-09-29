@@ -197,7 +197,7 @@ poetry run mypy research_swarm/
 
 The tests run with query expansion off, the single-call writer, no large model and no deep read (`tests/conftest.py`), because those paths make live searches. The sectioned writer, expansion and deep read are covered by their own mocked tests.
 
-Benchmarks and ablations live in `benchmarks/` (see [benchmarks/README.md](benchmarks/README.md)): a closed-corpus answer-quality benchmark (ALCE / HotpotQA / SciFact), a relevance-scorer benchmark and a live-question review harness (`benchmarks/quality_review/`). Sample reports from live runs are in `reports/`.
+Benchmarks and ablations live in `benchmarks/` (see [benchmarks/README.md](benchmarks/README.md)): a closed-corpus answer-quality benchmark (ALCE / HotpotQA / SciFact), a relevance-scorer benchmark and a live-question review harness (`benchmarks/quality_review/`).
 
 ---
 

@@ -122,7 +122,7 @@ def _enforce_plan(plan: ResearchPlan, frame: QuestionFrame, n_sq: int) -> Resear
     The frame is attached to the plan so later stages can enforce it too.
     """
     from research_swarm.agents.papers import keyword_query
-    from research_swarm.schemas.worker import SubQuestionAssignment, WorkerRole
+    from research_swarm.schemas.worker import SubQuestionAssignment
 
     session_id = current_llm_session.get()
     sub_questions = list(plan.sub_questions)
@@ -145,9 +145,7 @@ def _enforce_plan(plan: ResearchPlan, frame: QuestionFrame, n_sq: int) -> Resear
     new_sqs: list[str] = []
     assignments: list[SubQuestionAssignment] = []
     for sq in sub_questions:
-        assignment = by_key.get(sq.strip().lower()) or SubQuestionAssignment(
-            sub_question=sq, worker_role=WorkerRole.general,
-        )
+        assignment = by_key.get(sq.strip().lower()) or SubQuestionAssignment(sub_question=sq)
         new_sq = sq
         query = assignment.search_query.strip() or keyword_query(sq)
         if not scope_hit(sq, frame):
@@ -293,7 +291,7 @@ async def run_supervisor(state: AgentState, llm: BaseChatModel) -> SupervisorDec
             current_llm_session.get(), "supervisor.fallback", "note",
             error=f"{type(exc).__name__}: {str(exc)[:200]}",
         )
-        from research_swarm.schemas.worker import SubQuestionAssignment, WorkerRole
+        from research_swarm.schemas.worker import SubQuestionAssignment
         return SupervisorDecision(
             reasoning=(
                 f"FALLBACK PLAN: the planning LLM call failed ({type(exc).__name__}); "
@@ -306,7 +304,7 @@ async def run_supervisor(state: AgentState, llm: BaseChatModel) -> SupervisorDec
                 required_tools=["web_search"],
                 complexity_score=0.3,
                 assignments=[SubQuestionAssignment(
-                    sub_question=topic, worker_role=WorkerRole.general,
+                    sub_question=topic,
                     search_query=(frame.search_queries or [""])[0],
                 )],
             ), frame, 1),

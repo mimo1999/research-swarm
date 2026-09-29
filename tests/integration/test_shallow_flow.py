@@ -35,7 +35,7 @@ async def test_shallow_research_flow():
     from research_swarm.schemas.query import ResearchDepth, ResearchQuery
     from research_swarm.schemas.report import FinalReport, ReportSection
     from research_swarm.schemas.source import Source, SourceType
-    from research_swarm.schemas.worker import SubQuestionAssignment, WorkerRole
+    from research_swarm.schemas.worker import SubQuestionAssignment
 
     session_id = f"shallow-test-{uuid.uuid4().hex[:8]}"
     topic      = "Python async/await"
@@ -59,7 +59,7 @@ async def test_shallow_research_flow():
         strategy="Shallow research",
         required_tools=["web_search"],
         complexity_score=0.2,
-        assignments=[SubQuestionAssignment(sub_question=sub_q, worker_role=WorkerRole.general)],
+        assignments=[SubQuestionAssignment(sub_question=sub_q)],
     )
     finding = Finding(
         id="f1",
