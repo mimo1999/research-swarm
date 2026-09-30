@@ -155,9 +155,11 @@ The Audience dropdown sits next to the question box.
 
 ## UI
 
-![Landing page - sidebar with model selector, depth, HITL toggle, and document upload](docs/screenshots/01_landing.png)
+![Main page - sidebar settings and the research question box](docs/screenshots/01_main.jpg)
 
-![Report tab - executive summary, sections with inline citations, and reference list](docs/screenshots/06_report_top.png)
+![Trace graph - supervisor, paper scout / document workers, gap fill, verifier and writer](docs/screenshots/02_trace_graph.jpg)
+
+![Report tab - executive summary, sections with inline citations, and downloads](docs/screenshots/03_report.jpg)
 
 1. Enter a question, pick the audience and depth, and optionally upload PDFs or URLs. Uploads go straight to extraction and skip search.
 2. Click **Start Research**. A live trace and topology diagram show each stage as it runs: the current node is amber and visited nodes are green. The supervisor card shows the question frame the run is working from.
